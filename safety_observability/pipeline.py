@@ -8,7 +8,7 @@ from . import constants as C
 from .config import load_config, resolve_path
 from .deterministic import ATTACK, MODERATION, evaluate as deterministic_gate
 from .fasttext_router import FastTextRouter
-from .models import JailbreakModel, ModerationModel, PromptInjectionModel, resolve_device
+from .models import ModerationModel, PromptInjectionModel, resolve_device
 from .normalize import normalize
 
 
@@ -27,7 +27,6 @@ class SafetyObservabilityClassifier:
             "fp16_on_cuda": self.fp16_on_cuda,
         }
         self.prompt_injection = PromptInjectionModel(str(resolve_path(models["prompt_injection"]["local_path"])), **common)
-        self.jailbreak = JailbreakModel(str(resolve_path(models["jailbreak"]["local_path"])), **common)
         self.moderation = ModerationModel(str(resolve_path(models["moderation"]["local_path"])), **common)
 
     def classify(self, text: str, *, full_scan: bool | None = None, include_raw: bool = False) -> dict[str, Any]:
@@ -56,13 +55,10 @@ class SafetyObservabilityClassifier:
 
         if run_attack and not fast_allow:
             pi = self.prompt_injection.classify(norm.model_text)
-            jb = self.jailbreak.classify(norm.model_text)
             scores.update(pi["scores"])
-            scores.update(jb["scores"])
-            triggered.extend(["prompt_injection", "jailbreak"])
+            triggered.append("prompt_injection")
             if include_raw:
                 raw["prompt_injection"] = pi["raw"]
-                raw["jailbreak"] = jb["raw"]
         if run_moderation and not fast_allow:
             mod = self.moderation.classify(norm.model_text)
             scores.update(mod["scores"])
@@ -73,8 +69,6 @@ class SafetyObservabilityClassifier:
         labels = []
         if scores[C.PROMPT_INJECTION] >= thresholds["prompt_injection_review"]:
             labels.append(C.PROMPT_INJECTION)
-        if scores[C.JAILBREAK] >= thresholds["jailbreak_review"]:
-            labels.append(C.JAILBREAK)
         if scores[C.HARMFUL_CONTENT] >= thresholds["harmful_content_review"]:
             labels.append(C.HARMFUL_CONTENT)
         if scores[C.SEXUAL] >= thresholds["sexual_review"]:
@@ -86,7 +80,7 @@ class SafetyObservabilityClassifier:
             "fast_allow": fast_allow,
             "triggered_models": triggered,
             "skipped_models": [
-                name for name in ("prompt_injection", "jailbreak", "moderation") if name not in triggered
+                name for name in ("prompt_injection", "moderation") if name not in triggered
             ],
             "routing": {
                 "fasttext": {k: round(v, 4) for k, v in ft_scores.items()},

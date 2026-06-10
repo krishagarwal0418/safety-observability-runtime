@@ -27,7 +27,7 @@ Edit `configs/runtime.yaml` and set your Hugging Face model repos:
 
 - `models.fasttext_router.repo_id`: repo containing `router_head.ftz`
 - `models.prompt_injection.repo_id`: your prompt-injection DeBERTa repo
-- `models.jailbreak.repo_id`: jailbreak model repo
+- `models.prompt_injection_onnx_int8.repo_id`: optional quantized ONNX prompt-injection repo
 - `models.moderation.repo_id`: your fine-tuned moderation model repo
 
 Then download:
