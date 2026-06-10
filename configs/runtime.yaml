@@ -1,23 +1,23 @@
 models:
   fasttext_router:
     # Preferred: upload models/fasttext/router_head.ftz to a HF repo and set repo_id.
-    repo_id: "krishagarwal0418/safety-fasttext-router"
+    repo_id: "Krishagarwal314/safety-fasttext-router"
     filename: "router_head.ftz"
     local_path: "models/fasttext/router_head.ftz"
 
   prompt_injection:
     # Replace with your fine-tuned/quantized prompt-injection repo if uploaded.
-    repo_id: "krishagarwal0418/safety-prompt-injection"
+    repo_id: "Krishagarwal314/safety-prompt-injection"
     local_path: "models/transformers/prompt_injection"
 
   prompt_injection_onnx_int8:
     # Optional artifact for deployment experiments; runtime uses prompt_injection above by default.
-    repo_id: "krishagarwal0418/safety-prompt-injection-onnx-int8"
+    repo_id: "Krishagarwal314/safety-prompt-injection-onnx-int8"
     local_path: "models/onnx_int8/prompt_injection"
 
   moderation:
     # Replace with your fine-tuned 2-label Koala merged moderation repo.
-    repo_id: "krishagarwal0418/safety-moderation-2head"
+    repo_id: "Krishagarwal314/safety-moderation-2head"
     local_path: "models/transformers/moderation"
 
 thresholds:
