@@ -1,0 +1,7 @@
+PROMPT_INJECTION = "prompt_injection"
+JAILBREAK = "jailbreak"
+HARMFUL_CONTENT = "harmful_content"
+SEXUAL = "sexual"
+SAFE = "safe"
+
+PUBLIC_LABELS = (PROMPT_INJECTION, JAILBREAK, HARMFUL_CONTENT, SEXUAL)

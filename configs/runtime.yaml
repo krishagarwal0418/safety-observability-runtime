@@ -1,0 +1,39 @@
+models:
+  fasttext_router:
+    # Preferred: upload models/fasttext/router_head.ftz to a HF repo and set repo_id.
+    repo_id: ""
+    filename: "router_head.ftz"
+    local_path: "models/fasttext/router_head.ftz"
+
+  prompt_injection:
+    # Replace with your fine-tuned/quantized prompt-injection repo if uploaded.
+    repo_id: "protectai/deberta-v3-base-prompt-injection-v2"
+    local_path: "models/transformers/prompt_injection"
+
+  jailbreak:
+    repo_id: "madhurjindal/Jailbreak-Detector"
+    local_path: "models/transformers/jailbreak"
+
+  moderation:
+    # Replace with your fine-tuned 2-label Koala merged moderation repo.
+    repo_id: "KoalaAI/Text-Moderation"
+    local_path: "models/transformers/moderation"
+
+thresholds:
+  # FastText routing thresholds. Conservative defaults; replace from
+  # reports/fasttext_router_thresholds.json after calibration.
+  attack_route: 0.05
+  moderation_route: 0.05
+  fast_allow: 0.02
+
+  # BERT score thresholds for observability counters.
+  prompt_injection_review: 0.50
+  jailbreak_review: 0.50
+  harmful_content_review: 0.50
+  sexual_review: 0.50
+
+runtime:
+  device: "cuda"
+  max_length: 128
+  fp16_on_cuda: true
+  full_scan_default: false
