@@ -26,6 +26,8 @@ thresholds:
   attack_route: 0.05
   moderation_route: 0.05
   fast_allow: 0.02
+  fasttext_direct_safe_score: 0.995
+  fasttext_direct_safe_max_route: 0.01
 
   # BERT score thresholds for observability counters.
   prompt_injection_review: 0.50
@@ -37,3 +39,4 @@ runtime:
   max_length: 128
   fp16_on_cuda: true
   full_scan_default: false
+  fasttext_direct_safe_enabled: false

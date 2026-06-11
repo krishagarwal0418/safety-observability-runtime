@@ -34,7 +34,8 @@ class SafetyObservabilityClassifier:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
         thresholds = self.config["thresholds"]
-        full_scan = self.config.get("runtime", {}).get("full_scan_default", False) if full_scan is None else full_scan
+        runtime = self.config.get("runtime", {})
+        full_scan = runtime.get("full_scan_default", False) if full_scan is None else full_scan
         norm = normalize(text)
         rules = deterministic_gate(norm)
         ft = self.fasttext.predict(norm.detection_text)
@@ -42,11 +43,22 @@ class SafetyObservabilityClassifier:
 
         run_attack = full_scan or ATTACK in rules.force_route or ft_scores["attack"] >= thresholds["attack_route"]
         run_moderation = full_scan or MODERATION in rules.force_route or ft_scores["moderation"] >= thresholds["moderation_route"]
+        fasttext_direct_safe = (
+            bool(runtime.get("fasttext_direct_safe_enabled", False))
+            and not full_scan
+            and rules.allow_fast_skip
+            and ft_scores.get("safe", 0.0) >= thresholds["fasttext_direct_safe_score"]
+            and ft_scores["attack"] < thresholds["fasttext_direct_safe_max_route"]
+            and ft_scores["moderation"] < thresholds["fasttext_direct_safe_max_route"]
+        )
         fast_allow = (
+            fasttext_direct_safe
+            or (
             not full_scan
             and rules.allow_fast_skip
             and ft_scores["attack"] < thresholds["fast_allow"]
             and ft_scores["moderation"] < thresholds["fast_allow"]
+            )
         )
 
         scores = {label: 0.0 for label in C.PUBLIC_LABELS}
@@ -78,6 +90,7 @@ class SafetyObservabilityClassifier:
             "labels": labels,
             "scores": {k: round(v, 4) for k, v in scores.items()},
             "fast_allow": fast_allow,
+            "fasttext_direct_safe": fasttext_direct_safe,
             "triggered_models": triggered,
             "skipped_models": [
                 name for name in ("prompt_injection", "moderation") if name not in triggered
@@ -87,6 +100,10 @@ class SafetyObservabilityClassifier:
                 "rule_reasons": rules.reasons,
                 "run_attack": run_attack,
                 "run_moderation": run_moderation,
+                "fasttext_direct_safe_thresholds": {
+                    "safe_score": thresholds["fasttext_direct_safe_score"],
+                    "max_route": thresholds["fasttext_direct_safe_max_route"],
+                },
             },
             "latency_ms": round((time.time() - started) * 1000, 2),
             "raw": raw if include_raw else None,

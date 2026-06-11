@@ -10,7 +10,7 @@ validate text
 -> deterministic high-precision routing rules
 -> FastText coarse router: attack | moderation | safe
 -> safe fast-allow when both routes are very low
--> prompt-injection / jailbreak / moderation BERT confirmers when routed
+-> prompt-injection / moderation BERT confirmers when routed
 -> JSON scores and labels for counters/dashboards
 ```
 
@@ -72,3 +72,23 @@ python scripts/import_router_thresholds.py \
 
 The important gate metric is `unsafe_false_pass_rate`: unsafe rows that would
 skip all BERTs. Keep this very low.
+
+For testing only, `runtime.fasttext_direct_safe_enabled` can let very-high-safe
+FastText rows skip BERTs when the attack and moderation scores are both below
+`thresholds.fasttext_direct_safe_max_route`. Keep it disabled until router
+evaluation proves the false-pass rate is acceptable.
+
+## Quantize Moderation
+
+After downloading the moderation model, export and quantize it with:
+
+```bash
+pip install "optimum[onnxruntime]" onnxruntime
+python scripts/quantize_moderation.py \
+  --model models/transformers/moderation \
+  --fp32-output models/onnx/moderation \
+  --output models/onnx_int8/moderation
+```
+
+This writes an ONNX INT8 model plus tokenizer files and a
+`quantization_report.json`.
