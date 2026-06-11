@@ -92,3 +92,33 @@ python scripts/quantize_moderation.py \
 
 This writes an ONNX INT8 model plus tokenizer files and a
 `quantization_report.json`.
+
+To validate on a small sample only:
+
+```bash
+python scripts/quantize_moderation.py \
+  --model models/transformers/moderation \
+  --fp32-output models/onnx/moderation \
+  --output models/onnx_int8/moderation \
+  --eval-data ../safety-classifier/data/koala_merged_moderation/test.jsonl \
+  --eval-limit 500
+```
+
+## Evaluate Runtime Layer
+
+Run the full validation -> normalization -> deterministic rules -> FastText
+router -> BERT confirmer layer on a small labeled JSONL/CSV sample:
+
+```bash
+python scripts/evaluate_runtime_layer.py \
+  --config configs/runtime.yaml \
+  --data ../safety-classifier/data/processed/all_test.jsonl \
+  --limit 3000 \
+  --enable-direct-safe \
+  --direct-safe-score 0.995 \
+  --direct-safe-max-route 0.01 \
+  --output reports/runtime_layer_eval_3k.json
+```
+
+The report includes label precision/recall/F1, BERT call rate, FastText
+direct-safe rate, unsafe false-pass rate, and latency percentiles.

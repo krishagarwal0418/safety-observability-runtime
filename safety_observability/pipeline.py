@@ -54,10 +54,10 @@ class SafetyObservabilityClassifier:
         fast_allow = (
             fasttext_direct_safe
             or (
-            not full_scan
-            and rules.allow_fast_skip
-            and ft_scores["attack"] < thresholds["fast_allow"]
-            and ft_scores["moderation"] < thresholds["fast_allow"]
+                not full_scan
+                and rules.allow_fast_skip
+                and ft_scores["attack"] < thresholds["fast_allow"]
+                and ft_scores["moderation"] < thresholds["fast_allow"]
             )
         )
 
