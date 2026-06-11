@@ -122,3 +122,23 @@ python scripts/evaluate_runtime_layer.py \
 
 The report includes label precision/recall/F1, BERT call rate, FastText
 direct-safe rate, unsafe false-pass rate, and latency percentiles.
+
+For CPU-only batched evaluation with the quantized prompt-injection ONNX model
+and quantized moderation ONNX model:
+
+```bash
+python scripts/evaluate_quantized_full_suite.py \
+  --config configs/runtime.yaml \
+  --data ../safety-classifier/data/processed/all_test.jsonl \
+  --data ../safety-classifier/data/prompt_injection_best/test.jsonl \
+  --data ../safety-classifier/data/koala_merged_moderation/test.jsonl \
+  --limit 5000 \
+  --batch-size 32 \
+  --enable-direct-safe \
+  --direct-safe-score 0.995 \
+  --direct-safe-max-route 0.01 \
+  --output reports/quantized_full_suite_5k.json
+```
+
+This sampler tries to balance safe, prompt-injection, harmful-content, and
+sexual rows before filling any shortfall from the remaining rows.
