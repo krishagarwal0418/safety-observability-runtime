@@ -23,7 +23,17 @@ class FastTextRouter:
         started = time.time()
         scores = {"attack": 0.0, "moderation": 0.0, "safe": 0.0}
         if self.model is not None:
-            labels, probs = self.model.predict(" ".join(text.split()), k=-1)
+            clean = " ".join(text.split())
+            try:
+                labels, probs = self.model.predict(clean, k=-1)
+            except ValueError as exc:
+                if "Unable to avoid copy" not in str(exc):
+                    raise
+                predictions = self.model.f.predict(clean + "\n", -1, 0.0, "strict")
+                if predictions:
+                    probs, labels = zip(*predictions)
+                else:
+                    probs, labels = ([], ())
             for label, prob in zip(labels, probs):
                 key = label[len("__label__"):] if label.startswith("__label__") else label
                 if key in scores:
