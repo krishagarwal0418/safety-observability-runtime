@@ -39,6 +39,13 @@ HARMFUL_ALIASES = {
 PROMPT_ALIASES = {"prompt_injection", "injection", "inject", "jailbreak", "attack", "malicious"}
 
 
+def load_tokenizer(path: str | Path):
+    try:
+        return AutoTokenizer.from_pretrained(str(path), fix_mistral_regex=True)
+    except TypeError:
+        return AutoTokenizer.from_pretrained(str(path))
+
+
 def read_rows(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -63,7 +70,9 @@ def pick_text(row: dict[str, Any]) -> str:
 
 def labels_for(row: dict[str, Any]) -> set[str]:
     raw = row.get("labels", row.get("label", []))
-    if isinstance(raw, str):
+    if raw is None:
+        raw = []
+    elif isinstance(raw, (str, int, float, bool)):
         raw = [raw]
     labels = {str(x).lower().strip() for x in raw or []}
     out: set[str] = set()
@@ -166,7 +175,7 @@ class OnnxTextClassifier:
         self.model_dir = model_dir
         self.max_length = max_length
         self.sigmoid_outputs = sigmoid_outputs
-        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+        self.tokenizer = load_tokenizer(model_dir)
         cfg_path = model_dir / "config.json"
         self.id2label: dict[int, str] = {}
         if cfg_path.exists():

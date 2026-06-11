@@ -20,6 +20,15 @@ from pathlib import Path
 from typing import Any
 
 
+def _load_tokenizer(path: str | Path):
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained(str(path), fix_mistral_regex=True)
+    except TypeError:
+        return AutoTokenizer.from_pretrained(str(path))
+
+
 def _copy_tokenizer_files(src: Path, dst: Path) -> None:
     for name in (
         "config.json",
@@ -38,10 +47,9 @@ def _copy_tokenizer_files(src: Path, dst: Path) -> None:
 
 def export_fp32(model_dir: Path, output_dir: Path) -> Path:
     from optimum.onnxruntime import ORTModelForSequenceClassification
-    from transformers import AutoTokenizer
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+    tokenizer = _load_tokenizer(model_dir)
     model = ORTModelForSequenceClassification.from_pretrained(str(model_dir), export=True)
     model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
@@ -85,7 +93,9 @@ def _iter_rows(path: Path) -> list[dict[str, Any]]:
 
 def _labels(row: dict[str, Any]) -> set[str]:
     raw = row.get("labels", row.get("label", []))
-    if isinstance(raw, str):
+    if raw is None:
+        raw = []
+    elif isinstance(raw, (str, int, float, bool)):
         raw = [raw]
     labels = {str(x).lower().strip() for x in raw or []}
     out: set[str] = set()
@@ -119,10 +129,9 @@ def _score_model(model_dir: Path, data: Path, limit: int) -> dict[str, Any]:
     import numpy as np
     import onnxruntime as ort
     from sklearn.metrics import precision_recall_fscore_support
-    from transformers import AutoTokenizer
 
     rows = [r for r in _iter_rows(data) if _pick_text(r)][:limit]
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+    tokenizer = _load_tokenizer(model_dir)
     cfg_path = model_dir / "config.json"
     id2label = {}
     if cfg_path.exists():

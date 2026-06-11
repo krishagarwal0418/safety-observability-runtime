@@ -59,7 +59,9 @@ def pick_text(row: dict[str, Any]) -> str:
 
 def labels_for(row: dict[str, Any]) -> set[str]:
     raw = row.get("labels", row.get("label", []))
-    if isinstance(raw, str):
+    if raw is None:
+        raw = []
+    elif isinstance(raw, (str, int, float, bool)):
         raw = [raw]
     labels = {str(x).lower().strip() for x in raw or []}
     out: set[str] = set()
