@@ -250,28 +250,17 @@ MODERATION_POS = {"harmful_content", "harmful", "toxic", "hate", "sexual", "1", 
 
 # Per-dataset loaders for held-out benchmarks with non-standard schemas
 HELD_OUT_DATASETS = {
-    # ---- injection ----
-    "verazuo/jailbreak_llms": "injection",
+    # ---- injection (not in training) ----
     "JasperLS/prompt-injections": "injection",
-    # ---- moderation ----
-    "google/jigsaw_toxicity_pred": "moderation",
+    "JailbreakBench/JBB-Behaviors": "injection",
+    # ---- moderation (not in training) ----
     "ucberkeley-dlab/measuring-hate-speech": "moderation",
     "civil_comments": "moderation",
 }
 
 
-def _load_verazuo(ds) -> list[dict]:
-    split = "train" if "train" in ds else list(ds.keys())[0]
-    rows = []
-    for r in ds[split]:
-        txt = (r.get("prompt") or r.get("text") or "").strip()
-        label = r.get("label", r.get("jailbreak", r.get("is_jailbreak", 0)))
-        if txt:
-            rows.append({"text": txt, "gold": 1 if str(label).lower() in ("1", "true", "jailbreak") else 0})
-    return rows
-
-
 def _load_jasper(ds) -> list[dict]:
+    # JasperLS/prompt-injections: text (str), label (0/1 int)
     split = "train" if "train" in ds else list(ds.keys())[0]
     rows = []
     for r in ds[split]:
@@ -282,32 +271,33 @@ def _load_jasper(ds) -> list[dict]:
     return rows
 
 
-def _load_jigsaw(ds) -> list[dict]:
-    # google/jigsaw_toxicity_pred: columns = comment_text, toxic (0/1), severe_toxic, ...
-    split = "train" if "train" in ds else list(ds.keys())[0]
+def _load_jbb(ds) -> list[dict]:
+    # JailbreakBench/JBB-Behaviors: splits = 'harmful' and 'benign', text in 'Goal' column
     rows = []
-    for r in ds[split]:
-        txt = (r.get("comment_text") or "").strip()
-        gold = 1 if int(r.get("toxic", 0)) == 1 else 0
-        if txt:
-            rows.append({"text": txt, "gold": gold})
+    for split, gold in [("harmful", 1), ("benign", 0)]:
+        if split in ds:
+            for r in ds[split]:
+                txt = (r.get("Goal") or r.get("Behavior") or "").strip()
+                if txt:
+                    rows.append({"text": txt, "gold": gold})
     return rows
 
 
 def _load_measuring_hate(ds) -> list[dict]:
-    # ucberkeley-dlab/measuring-hate-speech: text column, label_hate_speech (0/1)
+    # ucberkeley-dlab/measuring-hate-speech: text (str), hate_speech_score (float, >0.5 = hate)
     split = "train" if "train" in ds else list(ds.keys())[0]
     rows = []
     for r in ds[split]:
         txt = (r.get("text") or "").strip()
-        gold = 1 if int(r.get("label_hate_speech", r.get("hate_speech_score", 0)) >= 0.5) else 0
+        score = float(r.get("hate_speech_score", 0))
+        gold = 1 if score >= 0.5 else 0
         if txt:
             rows.append({"text": txt, "gold": gold})
     return rows
 
 
 def _load_civil_comments(ds) -> list[dict]:
-    # civil_comments: comment_text, toxicity (float 0-1)
+    # civil_comments: comment_text (str), toxicity (float 0-1, >=0.5 = toxic)
     split = "train" if "train" in ds else list(ds.keys())[0]
     rows = []
     for r in ds[split]:
@@ -319,9 +309,8 @@ def _load_civil_comments(ds) -> list[dict]:
 
 
 HELD_OUT_LOADERS = {
-    "verazuo/jailbreak_llms": _load_verazuo,
     "JasperLS/prompt-injections": _load_jasper,
-    "google/jigsaw_toxicity_pred": _load_jigsaw,
+    "JailbreakBench/JBB-Behaviors": _load_jbb,
     "ucberkeley-dlab/measuring-hate-speech": _load_measuring_hate,
     "civil_comments": _load_civil_comments,
 }
