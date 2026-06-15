@@ -41,10 +41,14 @@ from evaluate_quantized_full_suite import (  # type: ignore[import-not-found]
 
 
 def load_tokenizer(path: str | Path):
-    try:
-        return AutoTokenizer.from_pretrained(str(path), fix_mistral_regex=True)
-    except TypeError:
-        return AutoTokenizer.from_pretrained(str(path))
+    # Do NOT pass fix_mistral_regex=True. transformers emits a warning
+    # recommending it, but that "fix" rewrites the tokenizer's split regex to
+    # the Mistral variant — which is NOT what these DeBERTa models were
+    # fine-tuned with. Applying it changes tokenization away from training and
+    # collapses every input to the positive class (precision ~0.04). The
+    # runtime (safety_observability/models.py) uses the plain tokenizer; match
+    # it here so eval/calibration agree with production.
+    return AutoTokenizer.from_pretrained(str(path))
 
 
 class TorchTextClassifier:
@@ -67,9 +71,18 @@ class TorchTextClassifier:
         self.model.to(self.device)
         cfg = getattr(self.model, "config", None)
         self.id2label = {int(k): v for k, v in getattr(cfg, "id2label", {}).items()} if cfg else {}
-        # DeBERTa v1 attention masking overflows FP16 — only enable autocast for v2/v3+
-        model_type = getattr(cfg, "model_type", "")
-        self.fp16 = bool(fp16 and self.device == "cuda" and model_type != "deberta")
+        # 16-bit inference: FP16 has only a 5-bit exponent, so the large logits
+        # produced by fine-tuned DeBERTa overflow to +/-inf, collapsing softmax
+        # to a near-constant and destroying precision. BF16 has the same
+        # exponent range as FP32 (8 bits) and is safe. Fall back to FP32 when
+        # BF16 is unavailable (e.g. Turing T4 GPUs).
+        self.amp_enabled = False
+        self.amp_dtype = torch.float32
+        if fp16 and self.device == "cuda" and torch.cuda.is_bf16_supported():
+            self.amp_enabled = True
+            self.amp_dtype = torch.bfloat16
+        # Kept for the latency report; reflects whether 16-bit AMP is active.
+        self.fp16 = self.amp_enabled
 
     def token_count(self, text: str) -> int:
         return len(self.tokenizer(text, truncation=True, max_length=self.max_length)["input_ids"])
@@ -93,7 +106,7 @@ class TorchTextClassifier:
             if self.device == "cuda":
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
-            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16, enabled=self.fp16):
+            with torch.inference_mode(), torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.amp_enabled):
                 logits = self.model(**enc).logits.float()
                 probs = torch.sigmoid(logits) if self.sigmoid_outputs else torch.softmax(logits, dim=-1)
                 probs = probs.detach().cpu()
@@ -119,6 +132,7 @@ class TorchTextClassifier:
             "token_lengths": token_lengths,
             "device": self.device,
             "fp16": self.fp16,
+            "amp_dtype": str(self.amp_dtype).replace("torch.", ""),
         }
         return outputs, stats
 

@@ -46,10 +46,8 @@ TEXTS = [
 
 
 def load(path: str, device: str):
-    try:
-        tok = AutoTokenizer.from_pretrained(path, fix_mistral_regex=True)
-    except TypeError:
-        tok = AutoTokenizer.from_pretrained(path)
+    # Plain tokenizer — fix_mistral_regex=True corrupts these DeBERTa models.
+    tok = AutoTokenizer.from_pretrained(path)
     model = AutoModelForSequenceClassification.from_pretrained(path).eval().to(device)
     id2label = {int(k): v for k, v in model.config.id2label.items()}
     return tok, model, id2label

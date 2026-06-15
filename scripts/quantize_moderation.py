@@ -23,10 +23,10 @@ from typing import Any
 def _load_tokenizer(path: str | Path):
     from transformers import AutoTokenizer
 
-    try:
-        return AutoTokenizer.from_pretrained(str(path), fix_mistral_regex=True)
-    except TypeError:
-        return AutoTokenizer.from_pretrained(str(path))
+    # Do NOT pass fix_mistral_regex=True — it changes tokenization away from
+    # what these DeBERTa models were fine-tuned with and collapses outputs.
+    # See evaluate_pytorch_gpu_suite.load_tokenizer for the full explanation.
+    return AutoTokenizer.from_pretrained(str(path))
 
 
 def _copy_tokenizer_files(src: Path, dst: Path) -> None:

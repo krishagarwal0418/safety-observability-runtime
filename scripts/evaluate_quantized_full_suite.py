@@ -44,10 +44,12 @@ PROMPT_ALIASES = {"prompt_injection", "injection", "inject", "jailbreak", "attac
 
 
 def load_tokenizer(path: str | Path):
-    try:
-        return AutoTokenizer.from_pretrained(str(path), fix_mistral_regex=True)
-    except TypeError:
-        return AutoTokenizer.from_pretrained(str(path))
+    # Do NOT pass fix_mistral_regex=True — it rewrites the tokenizer split
+    # regex to the Mistral variant, which is not what these DeBERTa models were
+    # fine-tuned with, and collapses every input to the positive class. Match
+    # the runtime (safety_observability/models.py) which uses the plain
+    # tokenizer. See evaluate_pytorch_gpu_suite.load_tokenizer for details.
+    return AutoTokenizer.from_pretrained(str(path))
 
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
