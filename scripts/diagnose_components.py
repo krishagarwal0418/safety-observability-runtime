@@ -16,6 +16,11 @@ Sections:
 """
 from __future__ import annotations
 
+import os
+# Must be set before transformers resolves any file paths to avoid
+# huggingface_hub validate_repo_id rejecting absolute local paths.
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import argparse
 import json
 import statistics
@@ -77,8 +82,8 @@ def stats(values: list[float]) -> str:
 
 
 def load_model(path: str, device: str):
-    tok = AutoTokenizer.from_pretrained(path, local_files_only=True)
-    model = AutoModelForSequenceClassification.from_pretrained(path, local_files_only=True)
+    tok = AutoTokenizer.from_pretrained(path)
+    model = AutoModelForSequenceClassification.from_pretrained(path)
     model.eval()
     if device == "cuda":
         model = model.to("cuda")
@@ -123,12 +128,17 @@ def sep(title: str = ""):
 def section_metadata(inj_path: str, mod_path: str):
     sep("1. MODEL METADATA")
     for label, path in [("Injection BERT", inj_path), ("Moderation BERT", mod_path)]:
-        cfg = AutoModelForSequenceClassification.from_pretrained(path, local_files_only=True).config
+        cfg_file = Path(path) / "config.json"
+        if not cfg_file.exists():
+            print(f"\n{label}: config.json not found at {cfg_file}")
+            continue
+        with open(cfg_file) as f:
+            cfg = json.load(f)
         print(f"\n{label} ({path})")
-        print(f"  model_type  : {cfg.model_type}")
-        print(f"  num_labels  : {cfg.num_labels}")
-        print(f"  id2label    : {getattr(cfg, 'id2label', '(missing)')}")
-        print(f"  problem_type: {getattr(cfg, 'problem_type', '(missing)')}")
+        print(f"  model_type  : {cfg.get('model_type', '(missing)')}")
+        print(f"  num_labels  : {cfg.get('num_labels', '(missing)')}")
+        print(f"  id2label    : {cfg.get('id2label', '(missing)')}")
+        print(f"  problem_type: {cfg.get('problem_type', '(missing)')}")
 
 
 # ---------------------------------------------------------------------------
