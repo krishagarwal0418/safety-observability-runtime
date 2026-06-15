@@ -17,9 +17,31 @@ Sections:
 from __future__ import annotations
 
 import os
-# Must be set before transformers resolves any file paths to avoid
-# huggingface_hub validate_repo_id rejecting absolute local paths.
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+import sys
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: newer huggingface_hub decorates try_to_load_from_cache with
+# @validate_args which rejects absolute local paths as invalid repo_ids.
+# Patching before transformers import ensures the patched version is used
+# everywhere (transformers.utils.hub imports it at module load time).
+# ---------------------------------------------------------------------------
+try:
+    import huggingface_hub.file_download as _hf_fd
+
+    _orig_try_cache = _hf_fd.try_to_load_from_cache
+
+    def _patched_try_cache(repo_id, filename, *args, **kwargs):  # type: ignore[override]
+        if isinstance(repo_id, (str, os.PathLike)) and os.path.isabs(str(repo_id)):
+            return None  # absolute local path — not an HF cache entry
+        return _orig_try_cache(repo_id, filename, *args, **kwargs)
+
+    _hf_fd.try_to_load_from_cache = _patched_try_cache  # type: ignore[assignment]
+    # transformers.utils.hub may have already imported try_to_load_from_cache;
+    # patch its reference too if transformers is already loaded.
+    if "transformers.utils.hub" in sys.modules:
+        sys.modules["transformers.utils.hub"].try_to_load_from_cache = _patched_try_cache
+except Exception as _e:
+    print(f"[warn] could not patch try_to_load_from_cache: {_e}")
 
 import argparse
 import json
@@ -29,6 +51,12 @@ from typing import Any
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+# Patch transformers reference after import (in case it wasn't loaded above).
+try:
+    import transformers.utils.hub as _t_hub
+    _t_hub.try_to_load_from_cache = _patched_try_cache  # type: ignore[assignment]
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # Probe sets
@@ -325,9 +353,27 @@ def section_pipeline(config_path: str | None = None):
 # ---------------------------------------------------------------------------
 
 
+def _find_dir(candidates: list[str]) -> str | None:
+    for c in candidates:
+        p = Path(c)
+        if p.exists() and (p / "config.json").exists():
+            return str(p.resolve())
+    return None
+
+
+def _find_file(candidates: list[str]) -> str | None:
+    for c in candidates:
+        if Path(c).exists():
+            return str(Path(c).resolve())
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir", default="models", help="directory containing transformers/ and fasttext/ subdirs")
+    parser.add_argument("--model-dir", default=None, help="directory containing transformers/ and fasttext/ subdirs")
+    parser.add_argument("--inj-path", default=None, help="direct path to prompt_injection model dir")
+    parser.add_argument("--mod-path", default=None, help="direct path to moderation model dir")
+    parser.add_argument("--ft-path", default=None, help="direct path to router_head.ftz")
     parser.add_argument("--config", default=None, help="runtime.yaml path (default: auto-detect)")
     parser.add_argument(
         "--test-jsonl",
@@ -338,54 +384,90 @@ def main():
     parser.add_argument("--skip-pipeline", action="store_true", help="skip section 6 (needs full model dir)")
     args = parser.parse_args()
 
-    model_dir = Path(args.model_dir)
-    inj_path = str(model_dir / "transformers" / "prompt_injection")
-    mod_path = str(model_dir / "transformers" / "moderation")
-    ft_path = str(model_dir / "fasttext" / "router_head.ftz")
+    # Resolve model paths: explicit flags > --model-dir > auto-discovery
+    search_roots = []
+    if args.model_dir:
+        search_roots.append(args.model_dir)
+    search_roots += ["models", "/content/models", "/content/drive/MyDrive/models"]
+
+    inj_path = args.inj_path or _find_dir(
+        [f"{r}/transformers/prompt_injection" for r in search_roots]
+    )
+    mod_path = args.mod_path or _find_dir(
+        [f"{r}/transformers/moderation" for r in search_roots]
+    )
+    ft_path = args.ft_path or _find_file(
+        [f"{r}/fasttext/router_head.ftz" for r in search_roots]
+    )
+
+    if not inj_path or not mod_path:
+        # Last-resort: scan /content for any config.json inside a transformers dir
+        import subprocess
+        result = subprocess.run(
+            ["find", "/content", "-path", "*/transformers/*/config.json", "-maxdepth", "8"],
+            capture_output=True, text=True, timeout=15,
+        )
+        found = [str(Path(p).parent) for p in result.stdout.strip().splitlines() if p]
+        if found:
+            print("[auto-discover] Found transformer model dirs:")
+            for f in found:
+                print(f"  {f}")
+            print("Re-run with --inj-path and --mod-path pointing to the right dirs above.")
+        else:
+            print("[auto-discover] No transformer models found under /content.")
+            print("Make sure models are downloaded. Run: python scripts/download_models.py")
+        if not inj_path and not mod_path:
+            sys.exit(1)
 
     test_jsonl = args.test_jsonl
     if test_jsonl is None:
-        # Try to find the training data relative to common locations
         for candidate in [
             "../safety-classifier/data/prompt_injection_best/test.jsonl",
             "../../safety-classifier/data/prompt_injection_best/test.jsonl",
+            "/content/safety-classifier/data/prompt_injection_best/test.jsonl",
         ]:
             if Path(candidate).exists():
                 test_jsonl = candidate
                 break
 
     print(f"Device: {args.device}")
-    print(f"Injection BERT : {inj_path}")
-    print(f"Moderation BERT: {mod_path}")
-    print(f"FastText router: {ft_path}")
+    print(f"Injection BERT : {inj_path or '(not found)'}")
+    print(f"Moderation BERT: {mod_path or '(not found)'}")
+    print(f"FastText router: {ft_path or '(not found)'}")
     print(f"Test JSONL     : {test_jsonl or '(not found — skipping section 4)'}")
 
     # Metadata (no GPU needed)
-    section_metadata(inj_path, mod_path)
+    section_metadata(inj_path or "", mod_path or "")
 
     # FastText
-    section_fasttext(ft_path)
+    section_fasttext(ft_path or "")
 
     # Injection BERT
-    print("\nLoading injection BERT (FP32)...")
-    inj_tok, inj_model = load_model(inj_path, args.device)
-    section_injection_probes(inj_tok, inj_model, args.device)
-    if test_jsonl:
-        section_injection_distribution(inj_tok, inj_model, args.device, test_jsonl, n_per_class=100)
+    if inj_path:
+        print("\nLoading injection BERT (FP32)...")
+        inj_tok, inj_model = load_model(inj_path, args.device)
+        section_injection_probes(inj_tok, inj_model, args.device)
+        if test_jsonl:
+            section_injection_distribution(inj_tok, inj_model, args.device, test_jsonl, n_per_class=100)
+        del inj_tok, inj_model
+        if args.device == "cuda":
+            torch.cuda.empty_cache()
+    else:
+        print("\n[skip] Injection BERT not found.")
 
     # Moderation BERT
-    print("\nLoading moderation BERT (FP32)...")
-    del inj_tok, inj_model  # free GPU memory
-    if args.device == "cuda":
-        torch.cuda.empty_cache()
-    mod_tok, mod_model = load_model(mod_path, args.device)
-    section_moderation_probes(mod_tok, mod_model, args.device)
-
-    # Pipeline
-    if not args.skip_pipeline:
+    if mod_path:
+        print("\nLoading moderation BERT (FP32)...")
+        mod_tok, mod_model = load_model(mod_path, args.device)
+        section_moderation_probes(mod_tok, mod_model, args.device)
         del mod_tok, mod_model
         if args.device == "cuda":
             torch.cuda.empty_cache()
+    else:
+        print("\n[skip] Moderation BERT not found.")
+
+    # Pipeline
+    if not args.skip_pipeline:
         section_pipeline(args.config)
 
     print("\n" + "=" * 70)
