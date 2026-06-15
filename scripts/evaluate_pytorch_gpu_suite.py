@@ -62,12 +62,11 @@ class TorchTextClassifier:
         self.sigmoid_outputs = sigmoid_outputs
         self.device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
         self.tokenizer = load_tokenizer(model_dir)
-        self.model = AutoModelForSequenceClassification.from_pretrained(str(model_dir))
+        self.fp16 = bool(fp16 and self.device == "cuda")
+        dtype = torch.float16 if self.fp16 else torch.float32
+        self.model = AutoModelForSequenceClassification.from_pretrained(str(model_dir), torch_dtype=dtype)
         self.model.eval()
         self.model.to(self.device)
-        self.fp16 = bool(fp16 and self.device == "cuda")
-        if self.fp16:
-            self.model.half()
         cfg = getattr(self.model, "config", None)
         self.id2label = {int(k): v for k, v in getattr(cfg, "id2label", {}).items()} if cfg else {}
 
