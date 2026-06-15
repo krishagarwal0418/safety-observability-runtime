@@ -77,8 +77,8 @@ def stats(values: list[float]) -> str:
 
 
 def load_model(path: str, device: str):
-    tok = AutoTokenizer.from_pretrained(path)
-    model = AutoModelForSequenceClassification.from_pretrained(path)
+    tok = AutoTokenizer.from_pretrained(path, local_files_only=True)
+    model = AutoModelForSequenceClassification.from_pretrained(path, local_files_only=True)
     model.eval()
     if device == "cuda":
         model = model.to("cuda")
@@ -123,7 +123,7 @@ def sep(title: str = ""):
 def section_metadata(inj_path: str, mod_path: str):
     sep("1. MODEL METADATA")
     for label, path in [("Injection BERT", inj_path), ("Moderation BERT", mod_path)]:
-        cfg = AutoModelForSequenceClassification.from_pretrained(path).config
+        cfg = AutoModelForSequenceClassification.from_pretrained(path, local_files_only=True).config
         print(f"\n{label} ({path})")
         print(f"  model_type  : {cfg.model_type}")
         print(f"  num_labels  : {cfg.num_labels}")
