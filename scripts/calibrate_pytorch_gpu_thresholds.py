@@ -106,44 +106,53 @@ def choose_label_thresholds(
     return out
 
 
-def choose_routing_thresholds(
+def choose_route_threshold(
     rows: list[dict[str, Any]],
     ft_scores: list[dict[str, float]],
     rule_routes: list[set[str]],
     *,
-    min_route_recall: float,
+    score_key: str,
+    force_key: str,
+    target_labels: set[str],
+    min_recall: float,
 ) -> dict[str, Any]:
-    grid = [0.0, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3]
-    unsafe = [1 if row["labels"] else 0 for row in rows]
+    """Pick the highest threshold for ONE route that still catches its OWN class.
+
+    Each BERT has a job: attack route exists to catch prompt_injection, moderation
+    route to catch harmful_content/sexual. Calibrating a route against *any* unsafe
+    label (the old behaviour) lets moderation become a catch-all at route=0 while
+    attack does nothing useful. We instead target each route at the label(s) that
+    route is responsible for, and pick the highest threshold (fewest rows routed)
+    that still recalls `min_recall` of that class.
+    """
+    grid = [0.0, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]
+    target = [1 if (set(row["labels"]) & target_labels) else 0 for row in rows]
+    total_target = sum(target)
     best = None
-    for attack_thr in grid:
-        for mod_thr in grid:
-            routed, prompt_calls, mod_calls = [], 0, 0
-            for scores, forced in zip(ft_scores, rule_routes):
-                run_attack = ATTACK in forced or scores["attack"] >= attack_thr
-                run_mod = MODERATION in forced or scores["moderation"] >= mod_thr
-                prompt_calls += int(run_attack)
-                mod_calls += int(run_mod)
-                routed.append(1 if run_attack or run_mod else 0)
-            m = binary_metrics(unsafe, routed)
-            calls = prompt_calls + mod_calls
-            c = {
-                "attack_route": attack_thr,
-                "moderation_route": mod_thr,
-                "route_precision": m["precision"],
-                "route_recall": m["recall"],
-                "route_f1": m["f1"],
-                "bert_calls": calls,
-                "bert_calls_per_row": round(calls / max(1, len(rows)), 4),
-                "any_bert_rows": sum(routed),
-                "any_bert_pct": pct(sum(routed), len(rows)),
-            }
-            if m["recall"] >= min_route_recall:
-                if best is None or (c["bert_calls"], -c["route_precision"]) < (best["bert_calls"], -best["route_precision"]):
-                    best = c
-            elif best is None or c["route_recall"] > best.get("route_recall", 0):
-                best = c
-    return best or {}
+    for thr in grid:
+        routed = [
+            1 if (force_key in forced or sc[score_key] >= thr) else 0
+            for sc, forced in zip(ft_scores, rule_routes)
+        ]
+        tp = sum(1 for t, r in zip(target, routed) if t and r)
+        recall = tp / total_target if total_target else 0.0
+        n_routed = sum(routed)
+        cand = {
+            "threshold": thr,
+            "target_recall": round(recall, 4),
+            "routed_rows": n_routed,
+            "routed_pct": pct(n_routed, len(rows)),
+            "target_total": total_target,
+            "target_routed": tp,
+            "route_precision": round(tp / n_routed, 4) if n_routed else 0.0,
+        }
+        if recall >= min_recall:
+            # Meets recall — prefer the threshold that routes the fewest rows.
+            if best is None or n_routed < best["routed_rows"]:
+                best = cand
+        elif best is None or recall > best["target_recall"]:
+            best = cand
+    return best or {"threshold": 0.0}
 
 
 def choose_fast_allow_threshold(
@@ -342,11 +351,34 @@ def main() -> None:
     print(f"[calibrate] FastText pass done in {ft_elapsed/1000:.1f}s")
 
     # ── Routing calibration first (FastText only, no BERT needed) ───────────
-    print("[calibrate] computing routing thresholds from FastText scores …")
-    routing_thr = choose_routing_thresholds(rows, ft_score_list, rule_route_list, min_route_recall=args.min_route_recall)
-    attack_thr = routing_thr.get("attack_route", 0.01)
-    mod_thr = routing_thr.get("moderation_route", 0.0)
-    print(f"[calibrate] routing: attack_route={attack_thr}  moderation_route={mod_thr}")
+    # Each route is calibrated against the class it is responsible for:
+    #   attack route      → prompt_injection recall
+    #   moderation route  → harmful_content / sexual recall
+    print("[calibrate] computing per-route thresholds from FastText scores …")
+    attack_route_cal = choose_route_threshold(
+        rows, ft_score_list, rule_route_list,
+        score_key="attack", force_key=ATTACK,
+        target_labels={PROMPT_INJECTION}, min_recall=args.min_route_recall,
+    )
+    mod_route_cal = choose_route_threshold(
+        rows, ft_score_list, rule_route_list,
+        score_key="moderation", force_key=MODERATION,
+        target_labels={HARMFUL_CONTENT, SEXUAL}, min_recall=args.min_route_recall,
+    )
+    attack_thr = attack_route_cal["threshold"]
+    mod_thr = mod_route_cal["threshold"]
+    routing_thr = {
+        "attack_route": attack_thr,
+        "moderation_route": mod_thr,
+        "attack_detail": attack_route_cal,
+        "moderation_detail": mod_route_cal,
+    }
+    print(f"[calibrate] routing: attack_route={attack_thr} "
+          f"(injection recall {attack_route_cal['target_recall']}, "
+          f"{attack_route_cal['routed_pct']}% routed)  "
+          f"moderation_route={mod_thr} "
+          f"(harmful/sexual recall {mod_route_cal['target_recall']}, "
+          f"{mod_route_cal['routed_pct']}% routed)")
 
     # ── Filter rows to those that would actually be routed to each BERT ──────
     # Prompt injection BERT only sees high-attack-score rows in production.
