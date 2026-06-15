@@ -62,12 +62,14 @@ class TorchTextClassifier:
         self.sigmoid_outputs = sigmoid_outputs
         self.device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
         self.tokenizer = load_tokenizer(model_dir)
-        self.fp16 = bool(fp16 and self.device == "cuda")
         self.model = AutoModelForSequenceClassification.from_pretrained(str(model_dir))
         self.model.eval()
         self.model.to(self.device)
         cfg = getattr(self.model, "config", None)
         self.id2label = {int(k): v for k, v in getattr(cfg, "id2label", {}).items()} if cfg else {}
+        # DeBERTa v1 attention masking overflows FP16 — only enable autocast for v2/v3+
+        model_type = getattr(cfg, "model_type", "")
+        self.fp16 = bool(fp16 and self.device == "cuda" and model_type != "deberta")
 
     def token_count(self, text: str) -> int:
         return len(self.tokenizer(text, truncation=True, max_length=self.max_length)["input_ids"])
