@@ -20,6 +20,11 @@ models:
     repo_id: "Krishagarwal314/safety-moderation-2head"
     local_path: "models/transformers/moderation"
 
+  moderation_onnx_int8:
+    # Optional artifact for CPU batch evaluation/deployment experiments.
+    repo_id: "Krishagarwal314/safety-moderation-2head-onnx-int8"
+    local_path: "models/onnx_int8/moderation"
+
 thresholds:
   # Calibrated on the narrowed observability scope:
   # prompt-injection/attack, toxicity, hate, harassment, sexual, and safe.

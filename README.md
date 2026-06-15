@@ -43,10 +43,11 @@ The default config downloads from:
 - `Krishagarwal314/safety-prompt-injection`
 - `Krishagarwal314/safety-prompt-injection-onnx-int8`
 - `Krishagarwal314/safety-moderation-2head`
+- `Krishagarwal314/safety-moderation-2head-onnx-int8`
 
 The runtime classifier uses the FastText router plus the prompt-injection and
-moderation transformer repos. The ONNX INT8 prompt artifact is included for CPU
-batch evaluation scripts.
+moderation transformer repos. The ONNX INT8 prompt and moderation artifacts are
+included for CPU batch evaluation/deployment experiments.
 
 ## Current Metrics
 
@@ -85,6 +86,7 @@ Edit `configs/runtime.yaml` and set your Hugging Face model repos:
 - `models.prompt_injection.repo_id`: your prompt-injection DeBERTa repo
 - `models.prompt_injection_onnx_int8.repo_id`: optional quantized ONNX prompt-injection repo
 - `models.moderation.repo_id`: your fine-tuned moderation model repo
+- `models.moderation_onnx_int8.repo_id`: optional quantized ONNX moderation repo
 
 Then download:
 
