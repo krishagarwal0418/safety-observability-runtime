@@ -87,6 +87,7 @@ def convert_to_fp16(fp32_onnx: Path, output_dir: Path, *, overwrite: bool) -> Pa
         disable_shape_infer=False,
     )
     normalize_float_constants_to_fp16(fp16_model, numpy_helper, TensorProto, np)
+    clear_intermediate_type_annotations(fp16_model)
     onnx.checker.check_model(fp16_model)
     onnx.save(fp16_model, str(output))
     copy_aux_files(fp32_onnx.parent, output_dir)
@@ -123,6 +124,18 @@ def normalize_float_constants_to_fp16(model, numpy_helper, tensor_proto, np) -> 
                 for idx, tensor in enumerate(attr.tensors):
                     if tensor.data_type == tensor_proto.FLOAT:
                         attr.tensors[idx].CopyFrom(convert_tensor(tensor))
+
+
+def clear_intermediate_type_annotations(model) -> None:
+    """Remove stale intermediate type metadata after FP16 conversion.
+
+    Some Optimum/DeBERTa exports carry value_info entries inferred before
+    conversion. ONNX Runtime can then see a Cast output annotated as float32 even
+    though the converted node now produces float16. Inputs and outputs are kept;
+    intermediate types are cheap for ORT to infer at load time.
+    """
+
+    del model.graph.value_info[:]
 
 
 def process_one(name: str, model_dir: Path, root: Path, *, overwrite: bool) -> dict[str, object]:
