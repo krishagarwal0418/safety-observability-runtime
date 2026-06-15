@@ -341,32 +341,72 @@ def main() -> None:
     ft_elapsed = (time.perf_counter() - started) * 1000
     print(f"[calibrate] FastText pass done in {ft_elapsed/1000:.1f}s")
 
-    # ── Pass 2: both BERTs on all rows in batches (GPU) ─────────────────────
-    print(f"[calibrate] running prompt BERT on all {len(rows)} rows …")
+    # ── Routing calibration first (FastText only, no BERT needed) ───────────
+    print("[calibrate] computing routing thresholds from FastText scores …")
+    routing_thr = choose_routing_thresholds(rows, ft_score_list, rule_route_list, min_route_recall=args.min_route_recall)
+    attack_thr = routing_thr.get("attack_route", 0.01)
+    mod_thr = routing_thr.get("moderation_route", 0.0)
+    print(f"[calibrate] routing: attack_route={attack_thr}  moderation_route={mod_thr}")
+
+    # ── Filter rows to those that would actually be routed to each BERT ──────
+    # Prompt injection BERT only sees high-attack-score rows in production.
+    # Calibrating its threshold on hate/toxic/safe content causes false-positive
+    # flooding — those rows never reach this model at inference time.
+    prompt_indices = [
+        i for i, (sc, forced) in enumerate(zip(ft_score_list, rule_route_list))
+        if ATTACK in forced or sc["attack"] >= attack_thr
+    ]
+    mod_indices = [
+        i for i, (sc, forced) in enumerate(zip(ft_score_list, rule_route_list))
+        if MODERATION in forced or sc["moderation"] >= mod_thr
+    ]
+    prompt_texts = [model_texts[i] for i in prompt_indices]
+    mod_texts = [model_texts[i] for i in mod_indices]
+    print(f"[calibrate] prompt BERT rows: {len(prompt_texts)}  moderation BERT rows: {len(mod_texts)}")
+
+    # ── Pass 2: BERTs on routed subsets only ────────────────────────────────
     t0 = time.perf_counter()
-    prompt_raw_all, prompt_stats = prompt_model.predict_batches(model_texts, args.batch_size)
+    print(f"[calibrate] running prompt BERT on {len(prompt_texts)} routed rows …")
+    prompt_raw_routed, prompt_stats = prompt_model.predict_batches(prompt_texts, args.batch_size)
     print(f"[calibrate] prompt BERT done in {(time.perf_counter()-t0):.1f}s")
 
-    print(f"[calibrate] running moderation BERT on all {len(rows)} rows …")
     t0 = time.perf_counter()
-    mod_raw_all, mod_stats = moderation_model.predict_batches(model_texts, args.batch_size)
+    print(f"[calibrate] running moderation BERT on {len(mod_texts)} routed rows …")
+    mod_raw_routed, mod_stats = moderation_model.predict_batches(mod_texts, args.batch_size)
     print(f"[calibrate] moderation BERT done in {(time.perf_counter()-t0):.1f}s")
 
-    # ── Collect scores ───────────────────────────────────────────────────────
-    bert_scores: dict[str, list[float]] = {label: [] for label in PUBLIC_LABELS}
-    for pi_raw, m_raw in zip(prompt_raw_all, mod_raw_all):
-        bert_scores[PROMPT_INJECTION].append(prompt_score(pi_raw))
-        ms = moderation_scores(m_raw)
-        bert_scores[HARMFUL_CONTENT].append(ms[HARMFUL_CONTENT])
-        bert_scores[SEXUAL].append(ms[SEXUAL])
+    # ── Collect scores aligned to routed subsets ─────────────────────────────
+    gold_all = make_gold(rows)
 
-    gold = make_gold(rows)
+    # Prompt injection: calibrate only on attack-routed rows
+    prompt_gold = {label: [gold_all[label][i] for i in prompt_indices] for label in PUBLIC_LABELS}
+    prompt_bert_scores: dict[str, list[float]] = {label: [0.0] * len(prompt_indices) for label in PUBLIC_LABELS}
+    for j, raw in enumerate(prompt_raw_routed):
+        prompt_bert_scores[PROMPT_INJECTION][j] = prompt_score(raw)
+
+    # Moderation: calibrate only on moderation-routed rows
+    mod_gold = {label: [gold_all[label][i] for i in mod_indices] for label in PUBLIC_LABELS}
+    mod_bert_scores: dict[str, list[float]] = {label: [0.0] * len(mod_indices) for label in PUBLIC_LABELS}
+    for j, raw in enumerate(mod_raw_routed):
+        ms = moderation_scores(raw)
+        mod_bert_scores[HARMFUL_CONTENT][j] = ms[HARMFUL_CONTENT]
+        mod_bert_scores[SEXUAL][j] = ms[SEXUAL]
+
     total_elapsed = (time.perf_counter() - started) * 1000
 
     # ── Calibrate ────────────────────────────────────────────────────────────
     print("[calibrate] grid-searching thresholds …")
-    label_thr = choose_label_thresholds(gold, bert_scores, min_recall=args.min_label_recall, beta=args.label_beta)
-    routing_thr = choose_routing_thresholds(rows, ft_score_list, rule_route_list, min_route_recall=args.min_route_recall)
+    pi_label_thr = choose_label_thresholds(
+        prompt_gold, prompt_bert_scores, min_recall=args.min_label_recall, beta=args.label_beta
+    )
+    mod_label_thr = choose_label_thresholds(
+        mod_gold, mod_bert_scores, min_recall=args.min_label_recall, beta=args.label_beta
+    )
+    label_thr = {
+        PROMPT_INJECTION: pi_label_thr[PROMPT_INJECTION],
+        HARMFUL_CONTENT: mod_label_thr[HARMFUL_CONTENT],
+        SEXUAL: mod_label_thr[SEXUAL],
+    }
     fast_allow_thr = choose_fast_allow_threshold(rows, ft_score_list, rule_route_list, max_false_pass_pct=args.max_fast_allow_false_pass_pct)
     safe_thr = choose_safe_thresholds(rows, ft_score_list, rule_route_list, max_false_pass_pct=args.max_safe_false_pass_pct)
     direct_prompt = choose_direct_label_threshold(
@@ -414,6 +454,12 @@ def main() -> None:
         "fp16": False,
         "batch_size": args.batch_size,
         "max_length": max_length,
+        "bert_routing": {
+            "prompt_routed_rows": len(prompt_indices),
+            "prompt_routed_pct": round(100 * len(prompt_indices) / len(rows), 2),
+            "moderation_routed_rows": len(mod_indices),
+            "moderation_routed_pct": round(100 * len(mod_indices) / len(rows), 2),
+        },
         "targets": {
             "min_label_recall": args.min_label_recall,
             "label_beta": args.label_beta,
