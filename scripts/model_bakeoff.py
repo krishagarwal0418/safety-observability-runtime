@@ -53,6 +53,8 @@ class ModelSpec:
     note: str = ""
     generative: bool = False         # True = CausalLM judge (ShieldGemma/Llama-Guard style)
     guideline: str = ""              # safety policy text for generative judges
+    parent: bool = False             # True = the model we fine-tuned FROM (not a fair rival)
+    size_m: float = 0.0              # approx params in millions, for the leaderboard
 
 
 def _get(raw: dict, *names: str, contains: tuple[str, ...] = ()) -> float:
@@ -70,21 +72,10 @@ def _get(raw: dict, *names: str, contains: tuple[str, ...] = ()) -> float:
 
 # ---- Injection task: positive = injection -------------------------------------
 
-def inj_ours(raw):       # our fine-tuned model: {SAFE, INJECTION}
-    return _get(raw, "injection", "label_1", contains=("inject", "malicious", "attack"))
-
-def inj_protectai(raw):  # protectai/deberta-v3-base-prompt-injection-v2: {SAFE, INJECTION}
-    return _get(raw, "injection", contains=("inject",))
-
-def inj_deepset(raw):    # deepset/deberta-v3-base-injection: {LEGIT, INJECTION}
-    return _get(raw, "injection", contains=("inject",))
-
-def inj_promptguard(raw):  # meta-llama/Prompt-Guard-86M: {BENIGN, INJECTION, JAILBREAK}
-    # Treat either injection or jailbreak as positive.
-    return max(
-        _get(raw, "injection", contains=("inject",)),
-        _get(raw, "jailbreak", contains=("jailbreak",)),
-    )
+def inj_generic(raw):
+    # Works for SAFE/INJECTION, LEGIT/INJECTION, LABEL_0/LABEL_1, and
+    # Prompt-Guard's BENIGN/INJECTION/JAILBREAK (jailbreak counts as positive).
+    return _get(raw, "injection", "label_1", contains=("inject", "malicious", "attack", "jailbreak"))
 
 
 # ---- Moderation task: positive = harmful/toxic --------------------------------
@@ -99,25 +90,34 @@ def mod_koala(raw):      # KoalaAI/Text-Moderation: {OK, H, HR, S, ...} softmax 
     ok = _get(raw, "ok", "label_0", contains=("safe", "neutral", "ok"))
     return 1.0 - ok if ok > 0 else _get(raw, contains=("h", "s", "v", "hr", "sh"))
 
-def mod_toxicbert(raw):  # unitary/toxic-bert: {toxic, severe_toxic, ...} (sigmoid, multi-label)
-    return _get(raw, "toxic", contains=("toxic", "threat", "insult", "hate", "obscene"))
+def mod_toxic_multi(raw):  # toxic-bert / MiniLM-jigsaw: {toxic, insult, ...} sigmoid multi-label
+    return _get(raw, "toxic", contains=("toxic", "threat", "insult", "hate", "obscene", "identity"))
+
+def mod_toxic_binary(raw):  # martin-ha/toxic-comment-model: {non-toxic, toxic} softmax
+    return _get(raw, "toxic", "label_1", contains=("toxic",))
 
 
 REGISTRIES: dict[str, list[ModelSpec]] = {
     "injection": [
         # ours — local path resolved at runtime from --our-model
-        ModelSpec("ours",        "__OURS__",                                              inj_ours,        deployable=True,  note="your fine-tune"),
-        ModelSpec("protectai",   "protectai/deberta-v3-base-prompt-injection-v2",         inj_protectai,   deployable=True),
-        ModelSpec("deepset",     "deepset/deberta-v3-base-injection",                     inj_deepset,     deployable=True),
-        ModelSpec("prompt-guard","meta-llama/Prompt-Guard-86M",                           inj_promptguard, deployable=True,  note="gated: needs HF auth"),
+        ModelSpec("ours",        "__OURS__",                                       inj_generic, note="your fine-tune", size_m=184),
+        # Same-size independent competitors / off-the-shelf adoption candidates.
+        ModelSpec("protectai",   "protectai/deberta-v3-base-prompt-injection-v2",  inj_generic, note="verify this isn't your base!", size_m=184),
+        ModelSpec("deepset",     "deepset/deberta-v3-base-injection",              inj_generic, size_m=184),
+        ModelSpec("prompt-guard","meta-llama/Prompt-Guard-86M",                    inj_generic, note="gated: needs HF auth", size_m=86),
+        ModelSpec("distilbert-pi","fmops/distilbert-prompt-injection",             inj_generic, note="off-the-shelf distilled", size_m=66),
     ],
     "moderation": [
-        ModelSpec("ours",        "__OURS__",                                              mod_ours,        sigmoid=True,  deployable=True, note="your fine-tune"),
-        ModelSpec("koala",       "KoalaAI/Text-Moderation",                               mod_koala,       sigmoid=False, deployable=True),
-        ModelSpec("toxic-bert",  "unitary/toxic-bert",                                    mod_toxicbert,   sigmoid=True,  deployable=True),
+        ModelSpec("ours",        "__OURS__",                          mod_ours,         sigmoid=True,  note="your fine-tune (from Koala)", size_m=86),
+        # Independent same-size competitors / off-the-shelf adoption candidates.
+        ModelSpec("toxic-bert",  "unitary/toxic-bert",               mod_toxic_multi,  sigmoid=True,  size_m=110),
+        ModelSpec("minilm-jigsaw","minuva/MiniLMv2-toxic-jigsaw",    mod_toxic_multi,  sigmoid=True,  note="off-the-shelf distilled MiniLM", size_m=23),
+        ModelSpec("distil-toxic","martin-ha/toxic-comment-model",    mod_toxic_binary, sigmoid=False, note="off-the-shelf distilled", size_m=67),
+        # Parent — the model we fine-tuned FROM; not a fair rival. Shown with --include-parents.
+        ModelSpec("koala(parent)","KoalaAI/Text-Moderation",         mod_koala,        sigmoid=False, parent=True, note="your base model — reference only", size_m=86),
         # Ceiling / distillation-teacher candidate (much bigger, generative judge).
         ModelSpec("shieldgemma-2b", "google/shieldgemma-2b", to_positive=lambda raw: 0.0,
-                  deployable=False, generative=True, note="gated ~2B teacher/ceiling; run with --include-ceiling and small --limit",
+                  deployable=False, generative=True, note="gated ~2B teacher/ceiling; --include-ceiling + small --limit", size_m=2000,
                   guideline=('"No Harmful Content": The prompt shall not contain or seek generation of content '
                              "that is hateful, harassing, violent, dangerous, or sexually explicit.")),
     ],
@@ -294,6 +294,7 @@ def main():
     ap.add_argument("--max-length", type=int, default=128)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--include-ceiling", action="store_true", help="also run much-bigger teacher/ceiling models")
+    ap.add_argument("--include-parents", action="store_true", help="also run the model we fine-tuned FROM (reference only)")
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
 
@@ -314,13 +315,16 @@ def main():
     specs = list(REGISTRIES[args.task])
     if not args.include_ceiling:
         specs = [s for s in specs if s.deployable]
+    if not args.include_parents:
+        specs = [s for s in specs if not s.parent]
 
     import dataclasses
     results = []
     for spec in specs:
         hf_id = args.our_model if spec.hf_id == "__OURS__" else spec.hf_id
         spec = dataclasses.replace(spec, hf_id=hf_id)
-        print(f"[run] {spec.name} <- {spec.hf_id}{('  ('+spec.note+')') if spec.note else ''}")
+        size = f"{spec.size_m:.0f}M" if spec.size_m else "?"
+        print(f"[run] {spec.name} ({size}) <- {spec.hf_id}{('  ('+spec.note+')') if spec.note else ''}")
         if spec.generative:
             scores = run_generative_model(spec, texts, args.device, args.max_length)
         else:
@@ -329,21 +333,22 @@ def main():
             continue
         at_half = prf(gold, scores, 0.5)
         bt, at_best = best_threshold(gold, scores)
-        results.append({"name": spec.name, "deployable": spec.deployable,
+        tag = "parent" if spec.parent else ("deployable" if spec.deployable else "ceiling")
+        results.append({"name": spec.name, "tag": tag, "size_m": spec.size_m,
                         "at_0.5": at_half, "best_threshold": bt, "at_best": at_best})
 
     # Leaderboard
     print("\n" + "=" * 92)
     print(f"  {args.task.upper()} BAKE-OFF  ({len(rows)} rows)")
     print("=" * 92)
-    print(f"{'model':<14} {'tag':<11} | {'F1@0.5':>7} {'P@0.5':>7} {'R@0.5':>7} | {'bestF1':>7} {'@thr':>5} {'P':>6} {'R':>6}")
-    print("-" * 92)
+    print(f"{'model':<15} {'tag':<11} {'size':>5} | {'F1@0.5':>7} {'P@0.5':>7} {'R@0.5':>7} | {'bestF1':>7} {'@thr':>5} {'P':>6} {'R':>6}")
+    print("-" * 100)
     for x in sorted(results, key=lambda z: z["at_best"]["f1"], reverse=True):
         a, b = x["at_0.5"], x["at_best"]
-        tag = "deployable" if x["deployable"] else "ceiling"
-        print(f"{x['name']:<14} {tag:<11} | {a['f1']:>7.3f} {a['precision']:>7.3f} {a['recall']:>7.3f} | "
+        size = f"{x['size_m']:.0f}M" if x["size_m"] else "?"
+        print(f"{x['name']:<15} {x['tag']:<11} {size:>5} | {a['f1']:>7.3f} {a['precision']:>7.3f} {a['recall']:>7.3f} | "
               f"{b['f1']:>7.3f} {x['best_threshold']:>5.2f} {b['precision']:>6.3f} {b['recall']:>6.3f}")
-    print("=" * 92)
+    print("=" * 100)
 
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
