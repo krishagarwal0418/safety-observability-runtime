@@ -139,6 +139,8 @@ def main() -> None:
     p.add_argument("--threshold-report", default=None)
     p.add_argument("--exclude-label", action="append", default=[])
     p.add_argument("--include-label", action="append", default=[])
+    p.add_argument("--full-scan", action="store_true",
+                   help="Run both BERTs on every row, bypassing FastText routing.")
     p.add_argument("--enable-fasttext-direct-classification", action="store_true")
     p.add_argument("--enable-direct-safe", action="store_true")
     p.add_argument("--fast-allow", type=float, default=None)
@@ -151,9 +153,11 @@ def main() -> None:
     cfg = load_config(args.config)
     thresholds = cfg["thresholds"]
     runtime_cfg = cfg.get("runtime", {})
-    if runtime_cfg.get("fasttext_direct_classification_enabled"):
+    if runtime_cfg.get("full_scan_default"):
+        args.full_scan = True
+    if runtime_cfg.get("fasttext_direct_classification_enabled") and not args.full_scan:
         args.enable_fasttext_direct_classification = True
-    if runtime_cfg.get("fasttext_direct_safe_enabled"):
+    if runtime_cfg.get("fasttext_direct_safe_enabled") and not args.full_scan:
         args.enable_direct_safe = True
     if args.threshold_report:
         report = json.loads(Path(args.threshold_report).read_text(encoding="utf-8"))
@@ -225,23 +229,26 @@ def main() -> None:
         ft = fasttext.predict(norm.detection_text)
         ft_latencies.append(float(ft["latency_ms"]))
         ft_scores = ft["scores"]
-        run_attack = ATTACK in rules.force_route or ft_scores["attack"] >= thresholds["attack_route"]
-        run_moderation = MODERATION in rules.force_route or ft_scores["moderation"] >= thresholds["moderation_route"]
+        run_attack = args.full_scan or ATTACK in rules.force_route or ft_scores["attack"] >= thresholds["attack_route"]
+        run_moderation = args.full_scan or MODERATION in rules.force_route or ft_scores["moderation"] >= thresholds["moderation_route"]
         direct_prompt = (
-            args.enable_fasttext_direct_classification
+            not args.full_scan
+            and args.enable_fasttext_direct_classification
             and rules.allow_fast_skip
             and ft_scores["attack"] >= thresholds.get("fasttext_direct_prompt_injection_score", 1.1)
             and ft_scores["moderation"] <= thresholds.get("fasttext_direct_prompt_injection_max_moderation", 0.0)
         )
         direct_harmful = (
-            args.enable_fasttext_direct_classification
+            not args.full_scan
+            and args.enable_fasttext_direct_classification
             and not direct_prompt
             and rules.allow_fast_skip
             and ft_scores["moderation"] >= thresholds.get("fasttext_direct_harmful_content_score", 1.1)
             and ft_scores["attack"] <= thresholds.get("fasttext_direct_harmful_content_max_attack", 0.0)
         )
         direct_safe = (
-            args.enable_direct_safe
+            not args.full_scan
+            and args.enable_direct_safe
             and not direct_prompt
             and not direct_harmful
             and rules.allow_fast_skip
@@ -250,7 +257,8 @@ def main() -> None:
             and ft_scores["moderation"] < thresholds["fasttext_direct_safe_max_route"]
         )
         fast_allow_safe = (
-            not direct_safe
+            not args.full_scan
+            and not direct_safe
             and rules.allow_fast_skip
             and ft_scores["attack"] < thresholds["fast_allow"]
             and ft_scores["moderation"] < thresholds["fast_allow"]

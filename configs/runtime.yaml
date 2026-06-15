@@ -65,6 +65,6 @@ runtime:
   device: "cuda"
   max_length: 128
   fp16_on_cuda: true
-  full_scan_default: false
+  full_scan_default: true
   fasttext_direct_safe_enabled: false
-  fasttext_direct_classification_enabled: true
+  fasttext_direct_classification_enabled: false
