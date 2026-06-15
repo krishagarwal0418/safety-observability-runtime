@@ -69,7 +69,9 @@ def export_fp32(model_dir: Path, output_dir: Path, *, overwrite: bool) -> Path:
 
 def convert_to_fp16(fp32_onnx: Path, output_dir: Path, *, overwrite: bool) -> Path:
     import onnx
+    from onnx import TensorProto, numpy_helper
     from onnxconverter_common import float16
+    import numpy as np
 
     if overwrite and output_dir.exists():
         shutil.rmtree(output_dir)
@@ -82,11 +84,45 @@ def convert_to_fp16(fp32_onnx: Path, output_dir: Path, *, overwrite: bool) -> Pa
     fp16_model = float16.convert_float_to_float16(
         model,
         keep_io_types=True,
-        disable_shape_infer=True,
+        disable_shape_infer=False,
     )
+    normalize_float_constants_to_fp16(fp16_model, numpy_helper, TensorProto, np)
+    onnx.checker.check_model(fp16_model)
     onnx.save(fp16_model, str(output))
     copy_aux_files(fp32_onnx.parent, output_dir)
     return output
+
+
+def normalize_float_constants_to_fp16(model, numpy_helper, tensor_proto, np) -> None:
+    """Convert leftover float32 constants after FP16 graph conversion.
+
+    DeBERTa exports can leave scalar Constant nodes in float32 while neighboring
+    tensors are FP16, which ONNX Runtime rejects for ops such as Mul. Keeping
+    graph inputs/outputs in their original types is fine; this pass only touches
+    embedded initializers and Constant node tensor attributes.
+    """
+
+    def convert_tensor(tensor):
+        if tensor.data_type != tensor_proto.FLOAT:
+            return tensor
+        arr = numpy_helper.to_array(tensor).astype(np.float16)
+        return numpy_helper.from_array(arr, name=tensor.name)
+
+    graph = model.graph
+    for idx, initializer in enumerate(graph.initializer):
+        if initializer.data_type == tensor_proto.FLOAT:
+            graph.initializer[idx].CopyFrom(convert_tensor(initializer))
+
+    for node in graph.node:
+        if node.op_type != "Constant":
+            continue
+        for attr in node.attribute:
+            if attr.type == attr.TENSOR and attr.t.data_type == tensor_proto.FLOAT:
+                attr.t.CopyFrom(convert_tensor(attr.t))
+            elif attr.type == attr.TENSORS:
+                for idx, tensor in enumerate(attr.tensors):
+                    if tensor.data_type == tensor_proto.FLOAT:
+                        attr.tensors[idx].CopyFrom(convert_tensor(tensor))
 
 
 def process_one(name: str, model_dir: Path, root: Path, *, overwrite: bool) -> dict[str, object]:
