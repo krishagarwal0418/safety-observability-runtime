@@ -104,7 +104,15 @@ class SafetyObservabilityClassifier:
             scores[C.HARMFUL_CONTENT] = max(scores[C.HARMFUL_CONTENT], 1.0)
 
         labels = []
-        if scores[C.PROMPT_INJECTION] >= thresholds["prompt_injection_review"]:
+        # Injection is vetoed when the moderation BERT marks the row strongly
+        # harmful: the injection model confuses toxic content with attacks, but
+        # real injections stay low on moderation. If moderation did not run,
+        # scores[HARMFUL_CONTENT] is 0.0 and the veto is a no-op.
+        max_harmful = thresholds.get("prompt_injection_max_harmful", 1.01)
+        if (
+            scores[C.PROMPT_INJECTION] >= thresholds["prompt_injection_review"]
+            and scores[C.HARMFUL_CONTENT] < max_harmful
+        ):
             labels.append(C.PROMPT_INJECTION)
         if scores[C.HARMFUL_CONTENT] >= thresholds["harmful_content_review"]:
             labels.append(C.HARMFUL_CONTENT)

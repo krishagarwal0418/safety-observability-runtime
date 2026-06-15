@@ -291,18 +291,28 @@ def main() -> None:
         prompt_token_lengths.append(prompt_model.token_count(norm.model_text))
         moderation_token_lengths.append(moderation_model.token_count(norm.model_text))
 
+    # Run both BERTs, then label. Moderation is scored first so the injection
+    # label can be vetoed when a row is strongly harmful (toxic content the
+    # injection model mistakes for an attack).
     prompt_raw, prompt_stats = prompt_model.predict_batches(route_texts["prompt"], args.batch_size)
-    for idx, raw in zip(route_indices["prompt"], prompt_raw):
-        if prompt_score(raw) >= thresholds["prompt_injection_review"]:
-            pred[PROMPT_INJECTION][idx] = 1
-
     mod_raw, mod_stats = moderation_model.predict_batches(route_texts["moderation"], args.batch_size)
+
+    mod_harmful_by_idx: dict[int, float] = {}
     for idx, raw in zip(route_indices["moderation"], mod_raw):
         scores = moderation_scores(raw)
+        mod_harmful_by_idx[idx] = scores[HARMFUL_CONTENT]
         if scores[HARMFUL_CONTENT] >= thresholds["harmful_content_review"]:
             pred[HARMFUL_CONTENT][idx] = 1
         if scores[SEXUAL] >= thresholds["sexual_review"]:
             pred[SEXUAL][idx] = 1
+
+    max_harmful = thresholds.get("prompt_injection_max_harmful", 1.01)
+    for idx, raw in zip(route_indices["prompt"], prompt_raw):
+        if (
+            prompt_score(raw) >= thresholds["prompt_injection_review"]
+            and mod_harmful_by_idx.get(idx, 0.0) < max_harmful
+        ):
+            pred[PROMPT_INJECTION][idx] = 1
 
     elapsed_ms = (time.perf_counter() - started) * 1000
     per_label = {label: binary_metrics(gold[label], pred[label]) for label in PUBLIC_LABELS}
@@ -349,6 +359,7 @@ def main() -> None:
             "fasttext_direct_prompt_injection_score": thresholds.get("fasttext_direct_prompt_injection_score"),
             "fasttext_direct_prompt_injection_max_moderation": thresholds.get("fasttext_direct_prompt_injection_max_moderation"),
             "prompt_injection_review": thresholds["prompt_injection_review"],
+            "prompt_injection_max_harmful": thresholds.get("prompt_injection_max_harmful", 1.01),
             "harmful_content_review": thresholds["harmful_content_review"],
             "sexual_review": thresholds["sexual_review"],
         },

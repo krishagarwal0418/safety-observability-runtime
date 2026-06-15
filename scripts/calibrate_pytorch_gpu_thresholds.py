@@ -106,6 +106,54 @@ def choose_label_thresholds(
     return out
 
 
+def choose_injection_veto_threshold(
+    gold: list[int],
+    inj_scores: list[float],
+    mod_harmful: list[float],
+    *,
+    min_recall: float,
+    beta: float,
+) -> dict[str, Any]:
+    """2D search: label injection iff inj_score >= t_inj AND mod_harmful < max_harmful.
+
+    The injection BERT cannot separate real injections from toxic content by its
+    own score (both saturate near 1.0). But the moderation BERT can: toxic rows
+    score high on harmful, real injections score low. So we veto the injection
+    label using the moderation harmful score. `max_harmful = 1.01` means the veto
+    is off (the toxic rows are not suppressed).
+    """
+    inj_grid = [round(x / 100, 2) for x in range(50, 96, 5)] + [0.97, 0.99]
+    veto_grid = [1.01, 0.95, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
+    best = None
+    for t_inj in inj_grid:
+        for max_harmful in veto_grid:
+            pred = [
+                1 if (s >= t_inj and h < max_harmful) else 0
+                for s, h in zip(inj_scores, mod_harmful)
+            ]
+            m = binary_metrics(gold, pred)
+            fb = fbeta(m["precision"], m["recall"], beta)
+            cand = {
+                "threshold": t_inj,
+                "max_harmful": max_harmful,
+                "veto_enabled": max_harmful <= 1.0,
+                "precision": m["precision"],
+                "recall": m["recall"],
+                "f1": m["f1"],
+                "fbeta": round(fb, 4),
+                "tp": m["tp"],
+                "fp": m["fp"],
+                "fn": m["fn"],
+            }
+            if m["recall"] >= min_recall:
+                if best is None or (cand["precision"], cand["fbeta"]) > (best["precision"], best["fbeta"]):
+                    best = cand
+            elif best is None or m["recall"] > best["recall"]:
+                best = cand
+    return best or {"threshold": 0.5, "max_harmful": 1.01, "veto_enabled": False,
+                    "precision": 0.0, "recall": 0.0, "f1": 0.0, "fbeta": 0.0}
+
+
 def choose_route_threshold(
     rows: list[dict[str, Any]],
     ft_scores: list[dict[str, float]],
@@ -416,26 +464,51 @@ def main() -> None:
     for j, raw in enumerate(prompt_raw_routed):
         prompt_bert_scores[PROMPT_INJECTION][j] = prompt_score(raw)
 
-    # Moderation: calibrate only on moderation-routed rows
+    # Moderation: calibrate only on moderation-routed rows. Also index the
+    # harmful score by original row id so the injection veto can look it up.
     mod_gold = {label: [gold_all[label][i] for i in mod_indices] for label in PUBLIC_LABELS}
     mod_bert_scores: dict[str, list[float]] = {label: [0.0] * len(mod_indices) for label in PUBLIC_LABELS}
+    mod_harmful_by_idx: dict[int, float] = {}
     for j, raw in enumerate(mod_raw_routed):
         ms = moderation_scores(raw)
         mod_bert_scores[HARMFUL_CONTENT][j] = ms[HARMFUL_CONTENT]
         mod_bert_scores[SEXUAL][j] = ms[SEXUAL]
+        mod_harmful_by_idx[mod_indices[j]] = ms[HARMFUL_CONTENT]
 
     total_elapsed = (time.perf_counter() - started) * 1000
 
     # ── Calibrate ────────────────────────────────────────────────────────────
     print("[calibrate] grid-searching thresholds …")
+    # Baseline (no veto) injection threshold, kept for comparison in the report.
     pi_label_thr = choose_label_thresholds(
         prompt_gold, prompt_bert_scores, min_recall=args.min_label_recall, beta=args.label_beta
     )
+    # Injection veto: search injection-score × max-moderation jointly. Uses the
+    # moderation harmful score for each attack-routed row (0.0 if that row was
+    # not moderation-routed, which means moderation never flagged it).
+    prompt_inj_scores = prompt_bert_scores[PROMPT_INJECTION]
+    prompt_gold_inj = prompt_gold[PROMPT_INJECTION]
+    prompt_mod_harmful = [mod_harmful_by_idx.get(i, 0.0) for i in prompt_indices]
+    inj_veto = choose_injection_veto_threshold(
+        prompt_gold_inj, prompt_inj_scores, prompt_mod_harmful,
+        min_recall=args.min_label_recall, beta=args.label_beta,
+    )
+    print(f"[calibrate] injection: no-veto P={pi_label_thr[PROMPT_INJECTION]['precision']} "
+          f"R={pi_label_thr[PROMPT_INJECTION]['recall']}  →  "
+          f"veto(max_harmful={inj_veto['max_harmful']}) "
+          f"P={inj_veto['precision']} R={inj_veto['recall']} F1={inj_veto['f1']}")
     mod_label_thr = choose_label_thresholds(
         mod_gold, mod_bert_scores, min_recall=args.min_label_recall, beta=args.label_beta
     )
     label_thr = {
-        PROMPT_INJECTION: pi_label_thr[PROMPT_INJECTION],
+        PROMPT_INJECTION: {
+            "threshold": inj_veto["threshold"],
+            "max_harmful": inj_veto["max_harmful"],
+            "precision": inj_veto["precision"],
+            "recall": inj_veto["recall"],
+            "f1": inj_veto["f1"],
+            "fbeta": inj_veto["fbeta"],
+        },
         HARMFUL_CONTENT: mod_label_thr[HARMFUL_CONTENT],
         SEXUAL: mod_label_thr[SEXUAL],
     }
@@ -461,6 +534,7 @@ def main() -> None:
             "fasttext_direct_safe_score": safe_thr["fasttext_direct_safe_score"],
             "fasttext_direct_safe_max_route": safe_thr["fasttext_direct_safe_max_route"],
             "prompt_injection_review": label_thr[PROMPT_INJECTION]["threshold"],
+            "prompt_injection_max_harmful": label_thr[PROMPT_INJECTION]["max_harmful"],
             "harmful_content_review": label_thr[HARMFUL_CONTENT]["threshold"],
             "sexual_review": label_thr[SEXUAL]["threshold"],
             "fasttext_direct_prompt_injection_score": direct_prompt["score"] if direct_prompt["enabled"] else 1.1,
@@ -502,6 +576,10 @@ def main() -> None:
         },
         "recommended": recommended,
         "label_thresholds": label_thr,
+        "injection_veto": {
+            "no_veto_baseline": pi_label_thr[PROMPT_INJECTION],
+            "with_veto": inj_veto,
+        },
         "routing_thresholds": routing_thr,
         "fast_allow_thresholds": fast_allow_thr,
         "safe_thresholds": safe_thr,
@@ -531,6 +609,7 @@ def main() -> None:
         f"  fasttext_direct_safe_score: {thr['fasttext_direct_safe_score']}",
         f"  fasttext_direct_safe_max_route: {thr['fasttext_direct_safe_max_route']}",
         f"  prompt_injection_review: {thr['prompt_injection_review']}",
+        f"  prompt_injection_max_harmful: {thr['prompt_injection_max_harmful']}",
         f"  harmful_content_review: {thr['harmful_content_review']}",
         f"  sexual_review: {thr['sexual_review']}",
         f"  fasttext_direct_prompt_injection_score: {thr['fasttext_direct_prompt_injection_score']}",

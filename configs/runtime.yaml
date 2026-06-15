@@ -49,6 +49,13 @@ thresholds:
   harmful_content_review: 0.40
   sexual_review: 0.70
 
+  # Injection veto: a row is only labelled prompt_injection if the injection
+  # score clears prompt_injection_review AND the moderation BERT's harmful score
+  # stays below this cap. Real injections are high-attack + low-moderation;
+  # toxic content the injection model mistakes for an attack is high on both,
+  # so this veto suppresses those false positives. 1.01 = veto disabled.
+  prompt_injection_max_harmful: 1.01
+
 runtime:
   device: "cuda"
   max_length: 128
