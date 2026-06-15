@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calibrate thresholds for the quantized CPU runtime stack."""
+"""Calibrate thresholds for the ONNX runtime stack."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from evaluate_quantized_full_suite import (  # type: ignore[import-not-found]
     ATTACK,
@@ -241,6 +242,7 @@ def main() -> None:
     p.add_argument("--max-length", type=int, default=None)
     p.add_argument("--onnx-intra-threads", type=int, default=0, help="0 lets ONNX Runtime choose.")
     p.add_argument("--onnx-inter-threads", type=int, default=1)
+    p.add_argument("--onnx-provider", choices=["cpu", "cuda", "auto"], default="cpu")
     p.add_argument("--prompt-onnx-dir", default=None)
     p.add_argument("--moderation-onnx-dir", default="models/onnx_int8/moderation")
     p.add_argument("--exclude-label", action="append", default=sorted(WEAK_DEFAULTS))
@@ -268,6 +270,7 @@ def main() -> None:
         "max_length": max_length,
         "intra_threads": args.onnx_intra_threads,
         "inter_threads": args.onnx_inter_threads,
+        "provider": args.onnx_provider,
     }
     prompt_model = OnnxTextClassifier(prompt_dir, sigmoid_outputs=False, **onnx_common)
     moderation_model = OnnxTextClassifier(moderation_dir, sigmoid_outputs=True, **onnx_common)
@@ -372,6 +375,7 @@ def main() -> None:
             "intra": args.onnx_intra_threads,
             "inter": args.onnx_inter_threads,
         },
+        "onnx_provider": args.onnx_provider,
         "recommended": recommended_yaml,
         "label_thresholds": label_thresholds,
         "routing_thresholds": routing_thresholds,

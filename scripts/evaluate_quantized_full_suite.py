@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""CPU-only batched evaluation of the quantized full runtime stack."""
+"""Batched evaluation of the ONNX full runtime stack.
+
+Use CPU INT8 artifacts with ``--onnx-provider cpu`` or GPU FP16/FP32 artifacts
+with ``--onnx-provider cuda``.
+"""
 
 from __future__ import annotations
 
@@ -226,6 +230,7 @@ class OnnxTextClassifier:
         sigmoid_outputs: bool,
         intra_threads: int = 0,
         inter_threads: int = 1,
+        provider: str = "cpu",
     ) -> None:
         self.model_dir = model_dir
         self.max_length = max_length
@@ -246,11 +251,25 @@ class OnnxTextClassifier:
             sess_options.intra_op_num_threads = intra_threads
         if inter_threads > 0:
             sess_options.inter_op_num_threads = inter_threads
+        available = ort.get_available_providers()
+        if provider == "cuda":
+            if "CUDAExecutionProvider" not in available:
+                raise RuntimeError(
+                    "CUDAExecutionProvider is not available in onnxruntime. "
+                    "Install onnxruntime-gpu and run on a CUDA machine, or use --onnx-provider cpu."
+                )
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        elif provider == "auto":
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in available else ["CPUExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
+        self.requested_providers = providers
         self.session = ort.InferenceSession(
             str(onnx_files[0]),
             sess_options=sess_options,
-            providers=["CPUExecutionProvider"],
+            providers=providers,
         )
+        self.providers = self.session.get_providers()
         self.input_names = {i.name for i in self.session.get_inputs()}
 
     def token_count(self, text: str) -> int:
@@ -293,6 +312,7 @@ class OnnxTextClassifier:
             "per_row_ms_p50": percentile(per_row, 50),
             "per_row_ms_p95": percentile(per_row, 95),
             "token_lengths": token_lengths,
+            "providers": self.providers,
         }
         return outputs, stats
 
@@ -351,6 +371,7 @@ def main() -> None:
     p.add_argument("--max-length", type=int, default=None)
     p.add_argument("--onnx-intra-threads", type=int, default=0, help="0 lets ONNX Runtime choose.")
     p.add_argument("--onnx-inter-threads", type=int, default=1)
+    p.add_argument("--onnx-provider", choices=["cpu", "cuda", "auto"], default="cpu")
     p.add_argument("--prompt-onnx-dir", default=None)
     p.add_argument("--moderation-onnx-dir", default="models/onnx_int8/moderation")
     p.add_argument("--output", default="reports/quantized_full_suite_5k.json")
@@ -362,12 +383,17 @@ def main() -> None:
     p.add_argument("--fast-allow", type=float, default=None)
     p.add_argument("--attack-route", type=float, default=None)
     p.add_argument("--moderation-route", type=float, default=None)
-    p.add_argument("--direct-safe-score", type=float, default=0.995)
-    p.add_argument("--direct-safe-max-route", type=float, default=0.01)
+    p.add_argument("--direct-safe-score", type=float, default=None)
+    p.add_argument("--direct-safe-max-route", type=float, default=None)
     args = p.parse_args()
 
     cfg = load_config(args.config)
     thresholds = cfg["thresholds"]
+    runtime_cfg = cfg.get("runtime", {})
+    if runtime_cfg.get("fasttext_direct_classification_enabled"):
+        args.enable_fasttext_direct_classification = True
+    if runtime_cfg.get("fasttext_direct_safe_enabled"):
+        args.enable_direct_safe = True
     if args.threshold_report:
         report = json.loads(Path(args.threshold_report).read_text(encoding="utf-8"))
         thresholds.update(report.get("recommended", {}).get("thresholds", {}))
@@ -382,8 +408,10 @@ def main() -> None:
         thresholds["attack_route"] = args.attack_route
     if args.moderation_route is not None:
         thresholds["moderation_route"] = args.moderation_route
-    thresholds["fasttext_direct_safe_score"] = args.direct_safe_score
-    thresholds["fasttext_direct_safe_max_route"] = args.direct_safe_max_route
+    if args.direct_safe_score is not None:
+        thresholds["fasttext_direct_safe_score"] = args.direct_safe_score
+    if args.direct_safe_max_route is not None:
+        thresholds["fasttext_direct_safe_max_route"] = args.direct_safe_max_route
 
     max_length = int(args.max_length or cfg.get("runtime", {}).get("max_length", 128))
     prompt_dir = Path(args.prompt_onnx_dir) if args.prompt_onnx_dir else resolve_path(
@@ -395,6 +423,7 @@ def main() -> None:
         "max_length": max_length,
         "intra_threads": args.onnx_intra_threads,
         "inter_threads": args.onnx_inter_threads,
+        "provider": args.onnx_provider,
     }
     prompt_model = OnnxTextClassifier(prompt_dir, sigmoid_outputs=False, **onnx_common)
     moderation_model = OnnxTextClassifier(moderation_dir, sigmoid_outputs=True, **onnx_common)
@@ -536,7 +565,8 @@ def main() -> None:
         "included_labels": sorted({x.lower() for x in args.include_label}),
         "raw_label_distribution": dict(Counter(label for row in rows for label in row.get("raw_labels", []))),
         "source_distribution": dict(Counter(row.get("source_path", "") for row in rows)),
-        "cpu_only": True,
+        "cpu_only": args.onnx_provider == "cpu",
+        "onnx_provider": args.onnx_provider,
         "batch_size": args.batch_size,
         "max_length": max_length,
         "onnx_threads": {
@@ -545,8 +575,8 @@ def main() -> None:
         },
         "models": {
             "fasttext": str(resolve_path(cfg["models"]["fasttext_router"]["local_path"])),
-            "prompt_onnx_int8": str(prompt_dir),
-            "moderation_onnx_int8": str(moderation_dir),
+            "prompt_onnx": str(prompt_dir),
+            "moderation_onnx": str(moderation_dir),
         },
         "thresholds": {
             "attack_route": thresholds["attack_route"],

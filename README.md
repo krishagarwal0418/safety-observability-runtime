@@ -47,11 +47,12 @@ The default config downloads from:
 
 The runtime classifier uses the FastText router plus the prompt-injection and
 moderation transformer repos. The ONNX INT8 prompt and moderation artifacts are
-included for CPU batch evaluation/deployment experiments.
+included for CPU batch evaluation/deployment experiments. For GPU experiments,
+export FP16 ONNX artifacts locally from the transformer repos.
 
 ## Current Metrics
 
-CPU-only ONNX evaluation on 1,000 balanced scoped rows:
+CPU ONNX INT8 evaluation on 1,000 balanced scoped rows:
 
 | Label | Precision | Recall | F1 |
 |---|---:|---:|---:|
@@ -168,6 +169,68 @@ python scripts/quantize_moderation.py \
   --eval-limit 500
 ```
 
+## GPU FP16 ONNX
+
+For CUDA deployment experiments, prefer FP16 ONNX over dynamic INT8. Dynamic
+INT8 is mainly a CPU optimization and can be slower or unsupported on GPU.
+
+Install the GPU export/runtime dependencies:
+
+```bash
+pip install "optimum[onnxruntime]" onnx onnxconverter-common onnxruntime-gpu
+```
+
+Download the transformer artifacts, then export FP16 ONNX copies:
+
+```bash
+safety-observe download --config configs/runtime.yaml
+
+python scripts/export_gpu_onnx_fp16.py \
+  --prompt-model models/transformers/prompt_injection \
+  --moderation-model models/transformers/moderation \
+  --output-root models/onnx_gpu \
+  --overwrite
+```
+
+This writes:
+
+- `models/onnx_gpu/fp16/prompt_injection`
+- `models/onnx_gpu/fp16/moderation`
+- `reports/gpu_onnx_fp16_export.json`
+
+Evaluate the FP16 ONNX stack on CUDA:
+
+```bash
+python scripts/evaluate_quantized_full_suite.py \
+  --config configs/runtime.yaml \
+  --prompt-onnx-dir models/onnx_gpu/fp16/prompt_injection \
+  --moderation-onnx-dir models/onnx_gpu/fp16/moderation \
+  --onnx-provider cuda \
+  --data ../safety-classifier/data/processed/all_test.jsonl \
+  --limit 1000 \
+  --batch-size 128 \
+  --max-length 128 \
+  --include-label safe \
+  --include-label prompt_injection \
+  --include-label injection \
+  --include-label attack \
+  --include-label toxicity \
+  --include-label toxic \
+  --include-label hate \
+  --include-label harassment \
+  --include-label sexual \
+  --exclude-label violence \
+  --exclude-label unknown \
+  --exclude-label self_harm \
+  --exclude-label self-harm \
+  --exclude-label dangerous_information \
+  --exclude-label illegal_activity \
+  --output reports/final_gpu_onnx_fp16_1k.json
+```
+
+The report includes `onnx_provider` and per-model `providers`; check that
+`CUDAExecutionProvider` appears there. If it does not, the run was not using GPU.
+
 ## Evaluate Runtime Layer
 
 Run the full validation -> normalization -> deterministic rules -> FastText
@@ -187,8 +250,8 @@ python scripts/evaluate_runtime_layer.py \
 The report includes label precision/recall/F1, BERT call rate, FastText
 direct-safe rate, unsafe false-pass rate, and latency percentiles.
 
-For CPU-only batched evaluation with the quantized prompt-injection ONNX model
-and quantized moderation ONNX model:
+For CPU batched evaluation with the quantized prompt-injection ONNX model and
+quantized moderation ONNX model:
 
 ```bash
 python scripts/evaluate_quantized_full_suite.py \
@@ -199,6 +262,7 @@ python scripts/evaluate_quantized_full_suite.py \
   --limit 1000 \
   --batch-size 128 \
   --max-length 128 \
+  --onnx-provider cpu \
   --include-label safe \
   --include-label prompt_injection \
   --include-label injection \
