@@ -248,6 +248,84 @@ def best_threshold(gold: list[int], scores: list[float]) -> tuple[float, dict]:
 INJECTION_POS = {"injection", "inject", "prompt_injection", "jailbreak", "1", "true", "attack", "malicious", "unsafe"}
 MODERATION_POS = {"harmful_content", "harmful", "toxic", "hate", "sexual", "1", "true", "unsafe", "harassment", "violence"}
 
+# Per-dataset loaders for held-out benchmarks with non-standard schemas
+HELD_OUT_DATASETS = {
+    # ---- injection ----
+    "verazuo/jailbreak_llms": "injection",
+    "JasperLS/prompt-injections": "injection",
+    # ---- moderation ----
+    "google/jigsaw_toxicity_pred": "moderation",
+    "ucberkeley-dlab/measuring-hate-speech": "moderation",
+    "civil_comments": "moderation",
+}
+
+
+def _load_verazuo(ds) -> list[dict]:
+    split = "train" if "train" in ds else list(ds.keys())[0]
+    rows = []
+    for r in ds[split]:
+        txt = (r.get("prompt") or r.get("text") or "").strip()
+        label = r.get("label", r.get("jailbreak", r.get("is_jailbreak", 0)))
+        if txt:
+            rows.append({"text": txt, "gold": 1 if str(label).lower() in ("1", "true", "jailbreak") else 0})
+    return rows
+
+
+def _load_jasper(ds) -> list[dict]:
+    split = "train" if "train" in ds else list(ds.keys())[0]
+    rows = []
+    for r in ds[split]:
+        txt = (r.get("text") or r.get("prompt") or "").strip()
+        label = r.get("label", 0)
+        if txt:
+            rows.append({"text": txt, "gold": 1 if str(label) in ("1", "true", "injection") else 0})
+    return rows
+
+
+def _load_jigsaw(ds) -> list[dict]:
+    # google/jigsaw_toxicity_pred: columns = comment_text, toxic (0/1), severe_toxic, ...
+    split = "train" if "train" in ds else list(ds.keys())[0]
+    rows = []
+    for r in ds[split]:
+        txt = (r.get("comment_text") or "").strip()
+        gold = 1 if int(r.get("toxic", 0)) == 1 else 0
+        if txt:
+            rows.append({"text": txt, "gold": gold})
+    return rows
+
+
+def _load_measuring_hate(ds) -> list[dict]:
+    # ucberkeley-dlab/measuring-hate-speech: text column, label_hate_speech (0/1)
+    split = "train" if "train" in ds else list(ds.keys())[0]
+    rows = []
+    for r in ds[split]:
+        txt = (r.get("text") or "").strip()
+        gold = 1 if int(r.get("label_hate_speech", r.get("hate_speech_score", 0)) >= 0.5) else 0
+        if txt:
+            rows.append({"text": txt, "gold": gold})
+    return rows
+
+
+def _load_civil_comments(ds) -> list[dict]:
+    # civil_comments: comment_text, toxicity (float 0-1)
+    split = "train" if "train" in ds else list(ds.keys())[0]
+    rows = []
+    for r in ds[split]:
+        txt = (r.get("comment_text") or "").strip()
+        gold = 1 if float(r.get("toxicity", 0)) >= 0.5 else 0
+        if txt:
+            rows.append({"text": txt, "gold": gold})
+    return rows
+
+
+HELD_OUT_LOADERS = {
+    "verazuo/jailbreak_llms": _load_verazuo,
+    "JasperLS/prompt-injections": _load_jasper,
+    "google/jigsaw_toxicity_pred": _load_jigsaw,
+    "ucberkeley-dlab/measuring-hate-speech": _load_measuring_hate,
+    "civil_comments": _load_civil_comments,
+}
+
 
 def load_rows(args) -> list[dict]:
     if args.data:
@@ -256,6 +334,14 @@ def load_rows(args) -> list[dict]:
         return rows
 
     from datasets import load_dataset
+    # Use dedicated loader for held-out datasets with non-standard schemas
+    if args.dataset in HELD_OUT_LOADERS:
+        print(f"[data] loading held-out dataset: {args.dataset}")
+        ds = load_dataset(args.dataset, args.dataset_config) if args.dataset_config else load_dataset(args.dataset)
+        rows = HELD_OUT_LOADERS[args.dataset](ds)
+        print(f"[data] {len(rows)} rows loaded | positives={sum(r['gold'] for r in rows)}")
+        return rows
+
     ds = load_dataset(args.dataset, args.dataset_config) if args.dataset_config else load_dataset(args.dataset)
     split = args.split or ("test" if "test" in ds else list(ds.keys())[0])
     feats = list(ds[split].features)
