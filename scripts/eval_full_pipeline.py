@@ -39,60 +39,77 @@ LABELS = ("prompt_injection", "harmful_content", "sexual", "safe")
 def _load_injection(n: int) -> list[dict]:
     from datasets import load_dataset
     print("[data] loading injection positives: xTRam1/safe-guard-prompt-injection ...")
-    ds = load_dataset("xTRam1/safe-guard-prompt-injection")["train"]
-    pos = [{"text": r["text"], "true_label": "prompt_injection"}
-           for r in ds if int(r.get("label", 0)) == 1 and r.get("text", "").strip()]
-    random.shuffle(pos)
-    return pos[:n]
+    df = load_dataset("xTRam1/safe-guard-prompt-injection", split="train").to_pandas()
+    df = df[(df["label"] == 1) & (df["text"].str.strip() != "")]
+    texts = df["text"].tolist()
+    random.shuffle(texts)
+    return [{"text": t, "true_label": "prompt_injection"} for t in texts[:n]]
 
 
 def _load_harmful(n: int) -> list[dict]:
     from datasets import load_dataset
     print("[data] loading harmful positives: ucberkeley-dlab/measuring-hate-speech ...")
-    ds = load_dataset("ucberkeley-dlab/measuring-hate-speech")["train"]
-    # Use high-confidence hate speech (score >= 1.0 = clearly positive)
-    pos = [{"text": r["text"], "true_label": "harmful_content"}
-           for r in ds if float(r.get("hate_speech_score", 0)) >= 1.0 and r.get("text", "").strip()]
-    random.shuffle(pos)
-    return pos[:n]
+    df = load_dataset("ucberkeley-dlab/measuring-hate-speech", split="train").to_pandas()
+    # High-confidence hate speech (score >= 1.0 = clearly positive)
+    df = df[(df["hate_speech_score"] >= 1.0) & (df["text"].str.strip() != "")]
+    texts = df["text"].drop_duplicates().tolist()
+    random.shuffle(texts)
+    return [{"text": t, "true_label": "harmful_content"} for t in texts[:n]]
 
 
 def _load_sexual(n: int) -> list[dict]:
+    """Sexual positives from civil_comments sexual_explicit field.
+
+    Uses pandas over the test+validation splits (reliable) rather than a raw
+    iteration over the 1.8M-row train split (which silently yielded 0 rows).
+    Threshold 0.4 gives ~760 rows across the two splits — plenty for eval.
+    """
     from datasets import load_dataset
     print("[data] loading sexual positives: google/civil_comments sexual_explicit ...")
-    ds = load_dataset("google/civil_comments")["train"]
-    pos = [{"text": r["comment_text"], "true_label": "sexual"}
-           for r in ds if float(r.get("sexual_explicit", 0)) >= 0.5 and r.get("comment_text", "").strip()]
-    random.shuffle(pos)
-    return pos[:n]
+    texts: list[str] = []
+    for split in ("test", "validation"):
+        df = load_dataset("google/civil_comments", split=split).to_pandas()
+        df = df[(df["sexual_explicit"] >= 0.4) & (df["comment_text"].str.strip() != "")]
+        texts.extend(df["comment_text"].tolist())
+    texts = list(dict.fromkeys(texts))  # dedupe, preserve order
+    random.shuffle(texts)
+    return [{"text": t, "true_label": "sexual"} for t in texts[:n]]
 
 
 def _load_safe(n: int) -> list[dict]:
     from datasets import load_dataset
-    print("[data] loading safe negatives: SQuAD questions ...")
-    ds = load_dataset("rajpurkar/squad")["validation"]
-    rows = [{"text": r["question"], "true_label": "safe"}
-            for r in ds if r.get("question", "").strip()]
-    # Also grab benign rows from civil_comments (low toxicity, low sexual)
-    print("[data] also loading safe from civil_comments low-toxicity rows ...")
-    ds2 = load_dataset("google/civil_comments")["test"]
-    civil_safe = [{"text": r["comment_text"], "true_label": "safe"}
-                  for r in ds2
-                  if float(r.get("toxicity", 1)) < 0.1
-                  and float(r.get("sexual_explicit", 1)) < 0.1
-                  and r.get("comment_text", "").strip()]
-    combined = rows + civil_safe
-    random.shuffle(combined)
-    return combined[:n]
+    print("[data] loading safe negatives: SQuAD questions + civil_comments benign ...")
+    sq = load_dataset("rajpurkar/squad", split="validation").to_pandas()
+    texts = sq["question"].tolist()
+    # Add genuinely benign civil_comments rows (low toxicity AND low sexual)
+    cc = load_dataset("google/civil_comments", split="test").to_pandas()
+    cc = cc[(cc["toxicity"] < 0.1) & (cc["sexual_explicit"] < 0.1) & (cc["comment_text"].str.strip() != "")]
+    texts.extend(cc["comment_text"].tolist())
+    texts = [t for t in texts if t and t.strip()]
+    random.shuffle(texts)
+    return [{"text": t, "true_label": "safe"} for t in texts[:n]]
 
 
 def assemble(rows_per_label: int, seed: int) -> list[dict]:
     random.seed(seed)
-    rows = []
-    rows += _load_injection(rows_per_label)
-    rows += _load_harmful(rows_per_label)
-    rows += _load_sexual(rows_per_label)
-    rows += _load_safe(rows_per_label)
+    pools = {
+        "prompt_injection": _load_injection(rows_per_label * 2),
+        "harmful_content": _load_harmful(rows_per_label * 2),
+        "sexual": _load_sexual(rows_per_label * 2),
+        "safe": _load_safe(rows_per_label * 2),
+    }
+    # Auto-balance: cap every category to the smallest available so the eval
+    # stays balanced and no category is silently empty.
+    avail = {l: len(pools[l]) for l in LABELS}
+    n = min(rows_per_label, *avail.values())
+    if n < rows_per_label:
+        print(f"\n[WARN] a category is short — balancing all to {n}/label. Available: {avail}")
+    for l in LABELS:
+        if avail[l] == 0:
+            print(f"[ERROR] category '{l}' has 0 rows — its head will NOT be evaluated!")
+    rows: list[dict] = []
+    for l in LABELS:
+        rows.extend(pools[l][:n])
     random.shuffle(rows)
     label_counts = {l: sum(1 for r in rows if r["true_label"] == l) for l in LABELS}
     print(f"\n[data] assembled {len(rows)} rows: {label_counts}\n")

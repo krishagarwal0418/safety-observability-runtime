@@ -2,6 +2,28 @@
 
 Standalone runtime for observability-only safety classification.
 
+## Quick start — evaluate the pipeline
+
+Clone, set your HF token (the models are private), and run one command:
+
+```bash
+git clone https://github.com/krishagarwal0418/safety-observability-runtime.git
+cd safety-observability-runtime
+pip install -r requirements.txt
+export HF_TOKEN=hf_xxx          # required: model repos are private
+python scripts/run_eval.py      # downloads both BERTs + runs full pipeline eval
+```
+
+`run_eval.py` downloads the injection and moderation models, reads the calibrated
+thresholds from `configs/runtime.yaml` (injection 0.50, moderation 0.93), and runs
+`eval_full_pipeline.py` over a balanced mixed corpus (prompt_injection + harmful_content
++ sexual + safe) sampled from held-out datasets not used in training. It prints
+per-label precision/recall/F1, a confusion matrix, and any coverage holes, and
+writes `reports/eval_full_pipeline.json`.
+
+Add `--rows-per-label 500` for a larger run, or `--device cpu` if no GPU.
+
+
 Pipeline:
 
 ```text
