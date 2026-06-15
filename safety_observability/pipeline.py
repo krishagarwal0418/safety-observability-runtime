@@ -43,9 +43,26 @@ class SafetyObservabilityClassifier:
 
         run_attack = full_scan or ATTACK in rules.force_route or ft_scores["attack"] >= thresholds["attack_route"]
         run_moderation = full_scan or MODERATION in rules.force_route or ft_scores["moderation"] >= thresholds["moderation_route"]
+        fasttext_direct_prompt = (
+            bool(runtime.get("fasttext_direct_classification_enabled", False))
+            and not full_scan
+            and rules.allow_fast_skip
+            and ft_scores["attack"] >= thresholds.get("fasttext_direct_prompt_injection_score", 1.1)
+            and ft_scores["moderation"] <= thresholds.get("fasttext_direct_prompt_injection_max_moderation", 0.0)
+        )
+        fasttext_direct_harmful = (
+            bool(runtime.get("fasttext_direct_classification_enabled", False))
+            and not fasttext_direct_prompt
+            and not full_scan
+            and rules.allow_fast_skip
+            and ft_scores["moderation"] >= thresholds.get("fasttext_direct_harmful_content_score", 1.1)
+            and ft_scores["attack"] <= thresholds.get("fasttext_direct_harmful_content_max_attack", 0.0)
+        )
         fasttext_direct_safe = (
             bool(runtime.get("fasttext_direct_safe_enabled", False))
             and not full_scan
+            and not fasttext_direct_prompt
+            and not fasttext_direct_harmful
             and rules.allow_fast_skip
             and ft_scores.get("safe", 0.0) >= thresholds["fasttext_direct_safe_score"]
             and ft_scores["attack"] < thresholds["fasttext_direct_safe_max_route"]
@@ -65,18 +82,26 @@ class SafetyObservabilityClassifier:
         raw: dict[str, Any] = {"fasttext": ft, "rules": {"routes": sorted(rules.force_route), "reasons": rules.reasons}}
         triggered: list[str] = ["fasttext_router"] if self.fasttext.loaded else []
 
-        if run_attack and not fast_allow:
+        if fasttext_direct_prompt:
+            scores[C.PROMPT_INJECTION] = 1.0
+            triggered.append("fasttext_direct_prompt_injection")
+        elif run_attack and not fast_allow:
             pi = self.prompt_injection.classify(norm.model_text)
             scores.update(pi["scores"])
             triggered.append("prompt_injection")
             if include_raw:
                 raw["prompt_injection"] = pi["raw"]
+        if fasttext_direct_harmful:
+            scores[C.HARMFUL_CONTENT] = 1.0
+            triggered.append("fasttext_direct_harmful_content")
         if run_moderation and not fast_allow:
             mod = self.moderation.classify(norm.model_text)
             scores.update(mod["scores"])
             triggered.append("moderation")
             if include_raw:
                 raw["moderation"] = mod["raw"]
+        if fasttext_direct_harmful:
+            scores[C.HARMFUL_CONTENT] = max(scores[C.HARMFUL_CONTENT], 1.0)
 
         labels = []
         if scores[C.PROMPT_INJECTION] >= thresholds["prompt_injection_review"]:
@@ -91,6 +116,8 @@ class SafetyObservabilityClassifier:
             "scores": {k: round(v, 4) for k, v in scores.items()},
             "fast_allow": fast_allow,
             "fasttext_direct_safe": fasttext_direct_safe,
+            "fasttext_direct_prompt_injection": fasttext_direct_prompt,
+            "fasttext_direct_harmful_content": fasttext_direct_harmful,
             "triggered_models": triggered,
             "skipped_models": [
                 name for name in ("prompt_injection", "moderation") if name not in triggered
@@ -103,6 +130,12 @@ class SafetyObservabilityClassifier:
                 "fasttext_direct_safe_thresholds": {
                     "safe_score": thresholds["fasttext_direct_safe_score"],
                     "max_route": thresholds["fasttext_direct_safe_max_route"],
+                },
+                "fasttext_direct_classification_thresholds": {
+                    "prompt_injection_score": thresholds.get("fasttext_direct_prompt_injection_score"),
+                    "prompt_injection_max_moderation": thresholds.get("fasttext_direct_prompt_injection_max_moderation"),
+                    "harmful_content_score": thresholds.get("fasttext_direct_harmful_content_score"),
+                    "harmful_content_max_attack": thresholds.get("fasttext_direct_harmful_content_max_attack"),
                 },
             },
             "latency_ms": round((time.time() - started) * 1000, 2),

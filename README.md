@@ -9,13 +9,69 @@ validate text
 -> normalize text
 -> deterministic high-precision routing rules
 -> FastText coarse router: attack | moderation | safe
--> safe fast-allow when both routes are very low
--> prompt-injection / moderation BERT confirmers when routed
+-> direct FastText prompt-injection for obvious high-confidence cases
+-> prompt-injection / moderation BERT confirmers for uncertain cases
 -> JSON scores and labels for counters/dashboards
 ```
 
 This is not a guardrail package. It returns labels/scores so your application can
 increment observability counters.
+
+## Scope
+
+The checked-in thresholds are calibrated for observability counters on:
+
+- `prompt_injection`
+- `sexual`
+- `harmful_content` covering `toxicity`, `hate`, and `harassment`
+
+The current thresholds do not claim reliable coverage for:
+
+- `self_harm`
+- `dangerous_information`
+- `illegal_activity`
+- `violence`
+
+`safe` is represented by no emitted labels. FastText direct safe-pass is disabled
+because calibration produced too many unsafe false-passes.
+
+## Model Artifacts
+
+The default config downloads from:
+
+- `Krishagarwal314/safety-fasttext-router`
+- `Krishagarwal314/safety-prompt-injection`
+- `Krishagarwal314/safety-prompt-injection-onnx-int8`
+- `Krishagarwal314/safety-moderation-2head`
+
+The runtime classifier uses the FastText router plus the prompt-injection and
+moderation transformer repos. The ONNX INT8 prompt artifact is included for CPU
+batch evaluation scripts.
+
+## Current Metrics
+
+CPU-only ONNX evaluation on 1,000 balanced scoped rows:
+
+| Label | Precision | Recall | F1 |
+|---|---:|---:|---:|
+| prompt_injection | 0.9268 | 0.9120 | 0.9194 |
+| harmful_content | 0.7117 | 0.8464 | 0.7732 |
+| sexual | 0.9731 | 0.8680 | 0.9175 |
+
+Overall:
+
+| Metric | Value |
+|---|---:|
+| macro_f1 | 0.8700 |
+| unsafe_any_precision | 0.9314 |
+| unsafe_any_recall | 0.9227 |
+| unsafe_any_f1 | 0.9270 |
+| unsafe_false_pass_pct_of_unsafe | 0.0% |
+| CPU throughput | 3.36 rows/sec |
+| CPU average latency | 298 ms/row |
+
+FastText directly classified 15.7% of rows as prompt injection with 0.9809
+precision in that run. Moderation remains the CPU bottleneck.
 
 ## Setup
 
@@ -55,28 +111,34 @@ print(result)
 
 ## Thresholds
 
-`configs/runtime.yaml` ships conservative defaults. After training/evaluating the
-FastText router in the training repo, copy the recommended values from:
+`configs/runtime.yaml` ships the current scoped thresholds:
 
-```text
-reports/fasttext_router_thresholds.json
+```yaml
+thresholds:
+  attack_route: 0.01
+  moderation_route: 0.0
+  fast_allow: 0.0
+  fasttext_direct_prompt_injection_score: 0.8
+  fasttext_direct_prompt_injection_max_moderation: 0.05
+  fasttext_direct_harmful_content_score: 1.1
+  fasttext_direct_safe_score: 1.1
+  prompt_injection_review: 0.75
+  harmful_content_review: 0.40
+  sexual_review: 0.70
+
+runtime:
+  fasttext_direct_classification_enabled: true
+  fasttext_direct_safe_enabled: false
 ```
 
-or run:
+Recalibrate with:
 
 ```bash
-python scripts/import_router_thresholds.py \
-  --report ../safety-classifier/reports/fasttext_router_thresholds.json \
-  --config configs/runtime.yaml
+python scripts/calibrate_quantized_thresholds.py ...
 ```
 
-The important gate metric is `unsafe_false_pass_rate`: unsafe rows that would
-skip all BERTs. Keep this very low.
-
-For testing only, `runtime.fasttext_direct_safe_enabled` can let very-high-safe
-FastText rows skip BERTs when the attack and moderation scores are both below
-`thresholds.fasttext_direct_safe_max_route`. Keep it disabled until router
-evaluation proves the false-pass rate is acceptable.
+Keep `fast_allow: 0.0` and `fasttext_direct_safe_enabled: false` unless a fresh
+calibration proves the unsafe false-pass rate is acceptable.
 
 ## Quantize Moderation
 
@@ -132,12 +194,25 @@ python scripts/evaluate_quantized_full_suite.py \
   --data ../safety-classifier/data/processed/all_test.jsonl \
   --data ../safety-classifier/data/prompt_injection_best/test.jsonl \
   --data ../safety-classifier/data/koala_merged_moderation/test.jsonl \
-  --limit 5000 \
-  --batch-size 32 \
-  --enable-direct-safe \
-  --direct-safe-score 0.995 \
-  --direct-safe-max-route 0.01 \
-  --output reports/quantized_full_suite_5k.json
+  --limit 1000 \
+  --batch-size 128 \
+  --max-length 128 \
+  --include-label safe \
+  --include-label prompt_injection \
+  --include-label injection \
+  --include-label attack \
+  --include-label toxicity \
+  --include-label toxic \
+  --include-label hate \
+  --include-label harassment \
+  --include-label sexual \
+  --exclude-label violence \
+  --exclude-label unknown \
+  --exclude-label self_harm \
+  --exclude-label self-harm \
+  --exclude-label dangerous_information \
+  --exclude-label illegal_activity \
+  --output reports/final_cpu_narrow_good_labels_1k.json
 ```
 
 This sampler tries to balance safe, prompt-injection, harmful-content, and

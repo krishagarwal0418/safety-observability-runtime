@@ -21,18 +21,28 @@ models:
     local_path: "models/transformers/moderation"
 
 thresholds:
-  # FastText routing thresholds. Conservative defaults; replace from
-  # reports/fasttext_router_thresholds.json after calibration.
-  attack_route: 0.05
-  moderation_route: 0.05
-  fast_allow: 0.02
-  fasttext_direct_safe_score: 0.995
-  fasttext_direct_safe_max_route: 0.01
+  # Calibrated on the narrowed observability scope:
+  # prompt-injection/attack, toxicity, hate, harassment, sexual, and safe.
+  # Violence, self-harm, dangerous information, and illegal activity are not
+  # claimed as supported by these thresholds.
+  attack_route: 0.01
+  moderation_route: 0.0
+  fast_allow: 0.0
+
+  # FastText direct classification. Only direct prompt-injection is active.
+  fasttext_direct_prompt_injection_score: 0.8
+  fasttext_direct_prompt_injection_max_moderation: 0.05
+  fasttext_direct_harmful_content_score: 1.1
+  fasttext_direct_harmful_content_max_attack: 0.001
+
+  # Direct safe-pass is intentionally disabled with an impossible threshold.
+  fasttext_direct_safe_score: 1.1
+  fasttext_direct_safe_max_route: 0.0
 
   # BERT score thresholds for observability counters.
-  prompt_injection_review: 0.50
-  harmful_content_review: 0.50
-  sexual_review: 0.50
+  prompt_injection_review: 0.75
+  harmful_content_review: 0.40
+  sexual_review: 0.70
 
 runtime:
   device: "cuda"
@@ -40,3 +50,4 @@ runtime:
   fp16_on_cuda: true
   full_scan_default: false
   fasttext_direct_safe_enabled: false
+  fasttext_direct_classification_enabled: true
