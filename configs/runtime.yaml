@@ -44,15 +44,20 @@ thresholds:
   fasttext_direct_safe_score: 1.1
   fasttext_direct_safe_max_route: 0.0
 
-  # BERT score thresholds for observability counters.
-  # 0.50 chosen from probe analysis: real injections score 0.999-1.000,
-  # toxic/safe score 0.000-0.015. ShieldLM dataset noise drove the
-  # calibrated threshold near 0 causing 48k FP on 50k rows; that dataset
-  # mislabels benign queries as injection and should not be used for
-  # injection threshold calibration.
+  # BERT score thresholds — calibrated on clean held-out benchmarks.
+  #
+  # Injection (0.50): well-calibrated at default on clean eval (safe-guard
+  # F1=0.993, SPML F1=0.996). No adjustment needed.
+  #
+  # Moderation (0.93): temperature-scaling calibration (T=3.693) on
+  # ucberkeley-dlab/measuring-hate-speech + google/civil_comments found
+  # optimal threshold = 0.67 on sigmoid(logit/T), equivalent to 0.93 on
+  # the raw sigmoid output. At 0.40 the model fires on 73% of benign JBB
+  # goals (false positives); at 0.93 precision improves substantially while
+  # recall stays high (0.82). See reports/calibration_moderation.json.
   prompt_injection_review: 0.50
-  harmful_content_review: 0.40
-  sexual_review: 0.70
+  harmful_content_review: 0.93
+  sexual_review: 0.93
 
   # Injection veto: a row is only labelled prompt_injection if the injection
   # score clears prompt_injection_review AND the moderation BERT's harmful score
