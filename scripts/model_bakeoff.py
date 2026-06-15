@@ -250,13 +250,37 @@ MODERATION_POS = {"harmful_content", "harmful", "toxic", "hate", "sexual", "1", 
 
 # Per-dataset loaders for held-out benchmarks with non-standard schemas
 HELD_OUT_DATASETS = {
-    # ---- injection (not in training) ----
-    "JasperLS/prompt-injections": "injection",
+    # ---- injection (not in OUR training) ----
+    "JasperLS/prompt-injections": "injection",   # == deepset/prompt-injections (mirror)
     "JailbreakBench/JBB-Behaviors": "injection",
-    # ---- moderation (not in training) ----
+    "xTRam1/safe-guard-prompt-injection": "injection",
+    "reshabhs/SPML_Chatbot_Prompt_Injection": "injection",
+    # ---- moderation (not in OUR training) ----
     "ucberkeley-dlab/measuring-hate-speech": "moderation",
     "civil_comments": "moderation",
 }
+
+# Contamination registry: which dataset *families* each model was trained on, so
+# the leaderboard can flag scores that are home-turf (not a fair comparison).
+# Keyed by model name -> set of dataset substrings. "ours" comes from our repo's
+# build_summary.json; competitors from their HF model cards.
+TRAINED_ON = {
+    "ours": {"shieldlm", "threat-matrix", "wambosec", "deepset/prompt-injections",
+             "jasperls", "rogue-security", "qualifire"},
+    "deepset": {"deepset/prompt-injections", "jasperls"},
+    "distilbert-pi": {"deepset/prompt-injections", "jasperls"},
+    "protectai": {"deepset/prompt-injections", "jasperls", "safe-guard"},  # protectai v2 used a broad public mix
+    # moderation competitors all train on jigsaw-family toxicity
+    "toxic-bert": {"jigsaw", "civil_comments", "civil"},
+    "minilm-jigsaw": {"jigsaw", "civil_comments", "civil"},
+    "distil-toxic": {"jigsaw", "civil_comments", "civil"},
+}
+
+
+def is_contaminated(model_name: str, dataset_id: str) -> bool:
+    fams = TRAINED_ON.get(model_name, set())
+    low = dataset_id.lower()
+    return any(f in low for f in fams)
 
 
 def _load_jasper(ds) -> list[dict]:
@@ -280,6 +304,28 @@ def _load_jbb(ds) -> list[dict]:
                 txt = (r.get("Goal") or r.get("Behavior") or "").strip()
                 if txt:
                     rows.append({"text": txt, "gold": gold})
+    return rows
+
+
+def _load_safeguard(ds) -> list[dict]:
+    # xTRam1/safe-guard-prompt-injection: text (str), label (0/1)
+    split = "train" if "train" in ds else list(ds.keys())[0]
+    rows = []
+    for r in ds[split]:
+        txt = (r.get("text") or "").strip()
+        if txt:
+            rows.append({"text": txt, "gold": 1 if int(r.get("label", 0)) == 1 else 0})
+    return rows
+
+
+def _load_spml(ds) -> list[dict]:
+    # reshabhs/SPML_Chatbot_Prompt_Injection: 'User Prompt' (str), 'Prompt injection' (0/1)
+    split = "train" if "train" in ds else list(ds.keys())[0]
+    rows = []
+    for r in ds[split]:
+        txt = (r.get("User Prompt") or "").strip()
+        if txt:
+            rows.append({"text": txt, "gold": 1 if int(r.get("Prompt injection", 0)) == 1 else 0})
     return rows
 
 
@@ -311,6 +357,8 @@ def _load_civil_comments(ds) -> list[dict]:
 HELD_OUT_LOADERS = {
     "JasperLS/prompt-injections": _load_jasper,
     "JailbreakBench/JBB-Behaviors": _load_jbb,
+    "xTRam1/safe-guard-prompt-injection": _load_safeguard,
+    "reshabhs/SPML_Chatbot_Prompt_Injection": _load_spml,
     "ucberkeley-dlab/measuring-hate-speech": _load_measuring_hate,
     "civil_comments": _load_civil_comments,
 }
@@ -419,25 +467,36 @@ def main():
         at_half = prf(gold, scores, 0.5)
         bt, at_best = best_threshold(gold, scores)
         tag = "parent" if spec.parent else ("deployable" if spec.deployable else "ceiling")
+        dataset_id = args.data or args.dataset or ""
+        contaminated = is_contaminated(spec.name, dataset_id)
         results.append({"name": spec.name, "tag": tag, "size_m": spec.size_m,
+                        "contaminated": contaminated,
                         "at_0.5": at_half, "best_threshold": bt, "at_best": at_best})
 
     # Leaderboard
+    dataset_id = args.data or args.dataset or ""
     print("\n" + "=" * 92)
-    print(f"  {args.task.upper()} BAKE-OFF  ({len(rows)} rows)")
+    print(f"  {args.task.upper()} BAKE-OFF  ({len(rows)} rows)  dataset={dataset_id}")
     print("=" * 92)
-    print(f"{'model':<15} {'tag':<11} {'size':>5} | {'F1@0.5':>7} {'P@0.5':>7} {'R@0.5':>7} | {'bestF1':>7} {'@thr':>5} {'P':>6} {'R':>6}")
+    print(f"{'model':<15} {'flag':<6} {'size':>5} | {'F1@0.5':>7} {'P@0.5':>7} {'R@0.5':>7} | {'bestF1':>7} {'@thr':>5} {'P':>6} {'R':>6}")
     print("-" * 100)
     for x in sorted(results, key=lambda z: z["at_best"]["f1"], reverse=True):
         a, b = x["at_0.5"], x["at_best"]
         size = f"{x['size_m']:.0f}M" if x["size_m"] else "?"
-        print(f"{x['name']:<15} {x['tag']:<11} {size:>5} | {a['f1']:>7.3f} {a['precision']:>7.3f} {a['recall']:>7.3f} | "
+        flag = "TRAIN!" if x["contaminated"] else "clean"
+        print(f"{x['name']:<15} {flag:<6} {size:>5} | {a['f1']:>7.3f} {a['precision']:>7.3f} {a['recall']:>7.3f} | "
               f"{b['f1']:>7.3f} {x['best_threshold']:>5.2f} {b['precision']:>6.3f} {b['recall']:>6.3f}")
     print("=" * 100)
+    n_dirty = sum(1 for x in results if x["contaminated"])
+    if n_dirty:
+        print(f"\n!! {n_dirty} model(s) flagged TRAIN! = this benchmark is in their training data — score is inflated, NOT a fair comparison.")
+    else:
+        print("\nAll models clean on this benchmark — fair comparison.")
 
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.output).write_text(json.dumps({"task": args.task, "n": len(rows), "results": results}, indent=2))
+        Path(args.output).write_text(json.dumps({"task": args.task, "n": len(rows),
+                                                  "dataset": dataset_id, "results": results}, indent=2))
         print(f"\nWrote {args.output}")
 
 
