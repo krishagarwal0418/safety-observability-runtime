@@ -51,6 +51,8 @@ class ModelSpec:
     sigmoid: bool = False            # multi-label sigmoid vs single-label softmax
     deployable: bool = True          # False = "ceiling/teacher", much bigger than ours
     note: str = ""
+    generative: bool = False         # True = CausalLM judge (ShieldGemma/Llama-Guard style)
+    guideline: str = ""              # safety policy text for generative judges
 
 
 def _get(raw: dict, *names: str, contains: tuple[str, ...] = ()) -> float:
@@ -113,6 +115,11 @@ REGISTRIES: dict[str, list[ModelSpec]] = {
         ModelSpec("ours",        "__OURS__",                                              mod_ours,        sigmoid=True,  deployable=True, note="your fine-tune"),
         ModelSpec("koala",       "KoalaAI/Text-Moderation",                               mod_koala,       sigmoid=False, deployable=True),
         ModelSpec("toxic-bert",  "unitary/toxic-bert",                                    mod_toxicbert,   sigmoid=True,  deployable=True),
+        # Ceiling / distillation-teacher candidate (much bigger, generative judge).
+        ModelSpec("shieldgemma-2b", "google/shieldgemma-2b", to_positive=lambda raw: 0.0,
+                  deployable=False, generative=True, note="gated ~2B teacher/ceiling; run with --include-ceiling and small --limit",
+                  guideline=('"No Harmful Content": The prompt shall not contain or seek generation of content '
+                             "that is hateful, harassing, violent, dangerous, or sexually explicit.")),
     ],
 }
 
@@ -142,6 +149,52 @@ def run_model(spec: ModelSpec, texts: list[str], device: str, batch_size: int, m
         for row in probs:
             raw = {id2label.get(i, f"LABEL_{i}"): float(row[i]) for i in range(len(row))}
             out.append(spec.to_positive(raw))
+    del model
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    return out
+
+
+def run_generative_model(spec: ModelSpec, texts: list[str], device: str, max_length: int) -> list[float] | None:
+    """ShieldGemma/Llama-Guard-style judge: prompt the model, read P(violation)
+    from the first generated token (Yes/No or safe/unsafe)."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    try:
+        tok = AutoTokenizer.from_pretrained(spec.hf_id)
+        model = AutoModelForCausalLM.from_pretrained(
+            spec.hf_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32
+        ).eval().to(device)
+    except Exception as e:
+        print(f"  [skip] {spec.name} ({spec.hf_id}): {e}")
+        return None
+
+    def tok_id(word: str) -> int | None:
+        ids = tok.encode(word, add_special_tokens=False)
+        return ids[0] if ids else None
+
+    yes_ids = [i for i in (tok_id("Yes"), tok_id(" Yes"), tok_id("unsafe"), tok_id(" unsafe")) if i is not None]
+    no_ids = [i for i in (tok_id("No"), tok_id(" No"), tok_id("safe"), tok_id(" safe")) if i is not None]
+    if not yes_ids or not no_ids:
+        print(f"  [skip] {spec.name}: could not locate Yes/No tokens")
+        return None
+
+    out: list[float] = []
+    for t in texts:
+        try:
+            inputs = tok.apply_chat_template(
+                [{"role": "user", "content": t}],
+                guideline=spec.guideline, return_tensors="pt", return_dict=True,
+            ).to(device)
+        except Exception:
+            prompt = f"{spec.guideline}\n\nUser: {t}\n\nDoes this violate the policy? Answer Yes or No.\n"
+            inputs = tok(prompt, return_tensors="pt", truncation=True, max_length=max_length * 4).to(device)
+        with torch.inference_mode():
+            last = model(**inputs).logits[0, -1, :].float()
+        probs = torch.softmax(last, dim=-1)
+        p_yes = float(probs[yes_ids].sum())
+        p_no = float(probs[no_ids].sum())
+        out.append(p_yes / (p_yes + p_no) if (p_yes + p_no) > 0 else 0.0)
+
     del model
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -262,12 +315,16 @@ def main():
     if not args.include_ceiling:
         specs = [s for s in specs if s.deployable]
 
+    import dataclasses
     results = []
     for spec in specs:
         hf_id = args.our_model if spec.hf_id == "__OURS__" else spec.hf_id
-        spec = ModelSpec(spec.name, hf_id, spec.to_positive, spec.sigmoid, spec.deployable, spec.note)
+        spec = dataclasses.replace(spec, hf_id=hf_id)
         print(f"[run] {spec.name} <- {spec.hf_id}{('  ('+spec.note+')') if spec.note else ''}")
-        scores = run_model(spec, texts, args.device, args.batch_size, args.max_length)
+        if spec.generative:
+            scores = run_generative_model(spec, texts, args.device, args.max_length)
+        else:
+            scores = run_model(spec, texts, args.device, args.batch_size, args.max_length)
         if scores is None:
             continue
         at_half = prf(gold, scores, 0.5)
