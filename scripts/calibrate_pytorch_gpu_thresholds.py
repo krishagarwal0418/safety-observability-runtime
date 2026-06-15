@@ -176,6 +176,7 @@ def choose_route_threshold(
     grid = [0.0, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]
     target = [1 if (set(row["labels"]) & target_labels) else 0 for row in rows]
     total_target = sum(target)
+    curve = []
     best = None
     for thr in grid:
         routed = [
@@ -194,13 +195,16 @@ def choose_route_threshold(
             "target_routed": tp,
             "route_precision": round(tp / n_routed, 4) if n_routed else 0.0,
         }
+        curve.append(cand)
         if recall >= min_recall:
             # Meets recall — prefer the threshold that routes the fewest rows.
             if best is None or n_routed < best["routed_rows"]:
                 best = cand
         elif best is None or recall > best["target_recall"]:
             best = cand
-    return best or {"threshold": 0.0}
+    best = dict(best or {"threshold": 0.0})
+    best["curve"] = curve
+    return best
 
 
 def choose_fast_allow_threshold(
@@ -421,12 +425,28 @@ def main() -> None:
         "attack_detail": attack_route_cal,
         "moderation_detail": mod_route_cal,
     }
+    def _print_curve(name: str, cal: dict) -> None:
+        print(f"[calibrate] {name} route recall/efficiency tradeoff "
+              f"(min_route_recall={args.min_route_recall}):")
+        print(f"            {'thr':>6} {'recall':>8} {'routed%':>9} {'route_P':>8}")
+        for c in cal.get("curve", []):
+            mark = " <- chosen" if c["threshold"] == cal["threshold"] else ""
+            print(f"            {c['threshold']:>6} {c['target_recall']:>8} "
+                  f"{c['routed_pct']:>9} {c['route_precision']:>8}{mark}")
+
+    _print_curve("ATTACK (injection)", attack_route_cal)
+    _print_curve("MODERATION (harmful/sexual)", mod_route_cal)
     print(f"[calibrate] routing: attack_route={attack_thr} "
           f"(injection recall {attack_route_cal['target_recall']}, "
           f"{attack_route_cal['routed_pct']}% routed)  "
           f"moderation_route={mod_thr} "
           f"(harmful/sexual recall {mod_route_cal['target_recall']}, "
           f"{mod_route_cal['routed_pct']}% routed)")
+    if attack_thr == 0.0 or mod_thr == 0.0:
+        print("[calibrate] WARNING: a route collapsed to 0.0 (routes 100%). The "
+              "FastText head cannot hit the recall target above threshold 0. "
+              "Lower --min-route-recall to route a subset, or accept full routing "
+              "(max quality, lower throughput). See the tradeoff curve above.")
 
     # ── Filter rows to those that would actually be routed to each BERT ──────
     # Prompt injection BERT only sees high-attack-score rows in production.
