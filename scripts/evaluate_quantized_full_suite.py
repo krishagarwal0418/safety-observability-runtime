@@ -184,7 +184,15 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
 
 
 class OnnxTextClassifier:
-    def __init__(self, model_dir: Path, *, max_length: int, sigmoid_outputs: bool) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        *,
+        max_length: int,
+        sigmoid_outputs: bool,
+        intra_threads: int = 0,
+        inter_threads: int = 1,
+    ) -> None:
         self.model_dir = model_dir
         self.max_length = max_length
         self.sigmoid_outputs = sigmoid_outputs
@@ -198,8 +206,12 @@ class OnnxTextClassifier:
         if not onnx_files:
             raise FileNotFoundError(f"No ONNX file found in {model_dir}")
         sess_options = ort.SessionOptions()
-        sess_options.intra_op_num_threads = 1
-        sess_options.inter_op_num_threads = 1
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        if intra_threads > 0:
+            sess_options.intra_op_num_threads = intra_threads
+        if inter_threads > 0:
+            sess_options.inter_op_num_threads = inter_threads
         self.session = ort.InferenceSession(
             str(onnx_files[0]),
             sess_options=sess_options,
@@ -303,6 +315,8 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--max-length", type=int, default=None)
+    p.add_argument("--onnx-intra-threads", type=int, default=0, help="0 lets ONNX Runtime choose.")
+    p.add_argument("--onnx-inter-threads", type=int, default=1)
     p.add_argument("--prompt-onnx-dir", default=None)
     p.add_argument("--moderation-onnx-dir", default="models/onnx_int8/moderation")
     p.add_argument("--output", default="reports/quantized_full_suite_5k.json")
@@ -342,8 +356,13 @@ def main() -> None:
     )
     moderation_dir = Path(args.moderation_onnx_dir)
     fasttext = FastTextRouter(resolve_path(cfg["models"]["fasttext_router"]["local_path"]))
-    prompt_model = OnnxTextClassifier(prompt_dir, max_length=max_length, sigmoid_outputs=False)
-    moderation_model = OnnxTextClassifier(moderation_dir, max_length=max_length, sigmoid_outputs=True)
+    onnx_common = {
+        "max_length": max_length,
+        "intra_threads": args.onnx_intra_threads,
+        "inter_threads": args.onnx_inter_threads,
+    }
+    prompt_model = OnnxTextClassifier(prompt_dir, sigmoid_outputs=False, **onnx_common)
+    moderation_model = OnnxTextClassifier(moderation_dir, sigmoid_outputs=True, **onnx_common)
 
     rows = balanced_sample(
         [Path(x) for x in args.data],
@@ -481,6 +500,10 @@ def main() -> None:
         "cpu_only": True,
         "batch_size": args.batch_size,
         "max_length": max_length,
+        "onnx_threads": {
+            "intra": args.onnx_intra_threads,
+            "inter": args.onnx_inter_threads,
+        },
         "models": {
             "fasttext": str(resolve_path(cfg["models"]["fasttext_router"]["local_path"])),
             "prompt_onnx_int8": str(prompt_dir),

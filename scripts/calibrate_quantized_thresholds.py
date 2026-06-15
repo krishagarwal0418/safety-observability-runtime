@@ -239,6 +239,8 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--max-length", type=int, default=None)
+    p.add_argument("--onnx-intra-threads", type=int, default=0, help="0 lets ONNX Runtime choose.")
+    p.add_argument("--onnx-inter-threads", type=int, default=1)
     p.add_argument("--prompt-onnx-dir", default=None)
     p.add_argument("--moderation-onnx-dir", default="models/onnx_int8/moderation")
     p.add_argument("--exclude-label", action="append", default=sorted(WEAK_DEFAULTS))
@@ -260,8 +262,13 @@ def main() -> None:
     rows = balanced_sample([Path(x) for x in args.data], args.limit, args.seed, excluded)
 
     fasttext = FastTextRouter(resolve_path(cfg["models"]["fasttext_router"]["local_path"]))
-    prompt_model = OnnxTextClassifier(prompt_dir, max_length=max_length, sigmoid_outputs=False)
-    moderation_model = OnnxTextClassifier(moderation_dir, max_length=max_length, sigmoid_outputs=True)
+    onnx_common = {
+        "max_length": max_length,
+        "intra_threads": args.onnx_intra_threads,
+        "inter_threads": args.onnx_inter_threads,
+    }
+    prompt_model = OnnxTextClassifier(prompt_dir, sigmoid_outputs=False, **onnx_common)
+    moderation_model = OnnxTextClassifier(moderation_dir, sigmoid_outputs=True, **onnx_common)
 
     print("[calibrate] sampled labels:", {k: sum(1 for r in rows if bucket_for(set(r["labels"])) == k) for k in ("safe", PROMPT_INJECTION, HARMFUL_CONTENT, SEXUAL)})
     started = time.perf_counter()
@@ -353,6 +360,10 @@ def main() -> None:
             "label_beta": args.label_beta,
             "min_route_recall": args.min_route_recall,
             "max_safe_false_pass_pct": args.max_safe_false_pass_pct,
+        },
+        "onnx_threads": {
+            "intra": args.onnx_intra_threads,
+            "inter": args.onnx_inter_threads,
         },
         "recommended": recommended_yaml,
         "label_thresholds": label_thresholds,
