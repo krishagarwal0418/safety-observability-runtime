@@ -306,6 +306,7 @@ def main() -> None:
     p.add_argument("--prompt-onnx-dir", default=None)
     p.add_argument("--moderation-onnx-dir", default="models/onnx_int8/moderation")
     p.add_argument("--output", default="reports/quantized_full_suite_5k.json")
+    p.add_argument("--threshold-report", default=None, help="Calibration JSON from calibrate_quantized_thresholds.py.")
     p.add_argument("--exclude-label", action="append", default=[])
     p.add_argument("--enable-direct-safe", action="store_true")
     p.add_argument("--fast-allow", type=float, default=None)
@@ -317,6 +318,9 @@ def main() -> None:
 
     cfg = load_config(args.config)
     thresholds = cfg["thresholds"]
+    if args.threshold_report:
+        report = json.loads(Path(args.threshold_report).read_text(encoding="utf-8"))
+        thresholds.update(report.get("recommended", {}).get("thresholds", {}))
     if args.fast_allow is not None:
         thresholds["fast_allow"] = args.fast_allow
     if args.attack_route is not None:
