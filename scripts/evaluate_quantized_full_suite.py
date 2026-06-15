@@ -104,12 +104,25 @@ def unique_key(text: str) -> str:
     return " ".join(text.lower().split())[:1000]
 
 
-def balanced_sample(paths: list[Path], limit: int, seed: int) -> list[dict[str, Any]]:
+def has_excluded_label(row: dict[str, Any], excluded: set[str]) -> bool:
+    raw = row.get("labels", row.get("label", []))
+    if raw is None:
+        raw = []
+    elif isinstance(raw, (str, int, float, bool)):
+        raw = [raw]
+    labels = {str(x).lower().strip() for x in raw or []}
+    return bool(labels & excluded)
+
+
+def balanced_sample(paths: list[Path], limit: int, seed: int, excluded_labels: set[str] | None = None) -> list[dict[str, Any]]:
     rng = random.Random(seed)
     buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     seen: set[str] = set()
+    excluded_labels = excluded_labels or set()
     for path in paths:
         for row in read_rows(path):
+            if has_excluded_label(row, excluded_labels):
+                continue
             text = pick_text(row)
             if not text:
                 continue
@@ -293,6 +306,7 @@ def main() -> None:
     p.add_argument("--prompt-onnx-dir", default=None)
     p.add_argument("--moderation-onnx-dir", default="models/onnx_int8/moderation")
     p.add_argument("--output", default="reports/quantized_full_suite_5k.json")
+    p.add_argument("--exclude-label", action="append", default=[])
     p.add_argument("--enable-direct-safe", action="store_true")
     p.add_argument("--fast-allow", type=float, default=None)
     p.add_argument("--attack-route", type=float, default=None)
@@ -321,7 +335,12 @@ def main() -> None:
     prompt_model = OnnxTextClassifier(prompt_dir, max_length=max_length, sigmoid_outputs=False)
     moderation_model = OnnxTextClassifier(moderation_dir, max_length=max_length, sigmoid_outputs=True)
 
-    rows = balanced_sample([Path(x) for x in args.data], args.limit, args.seed)
+    rows = balanced_sample(
+        [Path(x) for x in args.data],
+        args.limit,
+        args.seed,
+        {x.lower() for x in args.exclude_label},
+    )
     print("[suite] sampled labels:", dict(Counter(bucket_for(set(r["labels"])) for r in rows)))
 
     started = time.perf_counter()
@@ -423,6 +442,7 @@ def main() -> None:
     report = {
         "rows": len(rows),
         "sample_distribution": dict(Counter(bucket_for(set(r["labels"])) for r in rows)),
+        "excluded_labels": sorted({x.lower() for x in args.exclude_label}),
         "cpu_only": True,
         "batch_size": args.batch_size,
         "max_length": max_length,
