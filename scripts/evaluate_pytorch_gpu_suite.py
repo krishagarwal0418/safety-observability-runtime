@@ -63,8 +63,7 @@ class TorchTextClassifier:
         self.device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
         self.tokenizer = load_tokenizer(model_dir)
         self.fp16 = bool(fp16 and self.device == "cuda")
-        dtype = torch.float16 if self.fp16 else torch.float32
-        self.model = AutoModelForSequenceClassification.from_pretrained(str(model_dir), torch_dtype=dtype)
+        self.model = AutoModelForSequenceClassification.from_pretrained(str(model_dir))
         self.model.eval()
         self.model.to(self.device)
         cfg = getattr(self.model, "config", None)
@@ -92,7 +91,7 @@ class TorchTextClassifier:
             if self.device == "cuda":
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
-            with torch.inference_mode():
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16, enabled=self.fp16):
                 logits = self.model(**enc).logits.float()
                 probs = torch.sigmoid(logits) if self.sigmoid_outputs else torch.softmax(logits, dim=-1)
                 probs = probs.detach().cpu()
