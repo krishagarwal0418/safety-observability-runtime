@@ -174,6 +174,31 @@ def section_metadata(inj_path: str, mod_path: str):
 # ---------------------------------------------------------------------------
 
 
+def _ft_predict(ft, text: str, k: int = -1) -> dict[str, float]:
+    """Call ft.predict with a numpy-2.x compatibility shim.
+
+    The fasttext library uses np.array(..., copy=False) which raises ValueError
+    in NumPy >= 2.0.  Temporarily replace np.array with a compatible version
+    only for this call.
+    """
+    import numpy as _np
+
+    _orig = _np.array
+
+    def _compat(*a, copy=None, **kw):  # type: ignore[override]
+        if copy is False:
+            return _np.asarray(*a, **kw)
+        return _orig(*a, copy=copy, **kw) if copy is not None else _orig(*a, **kw)
+
+    _np.array = _compat  # type: ignore[assignment]
+    try:
+        labels, probs = ft.predict(text, k=k)
+    finally:
+        _np.array = _orig  # type: ignore[assignment]
+
+    return {lbl.replace("__label__", ""): float(p) for lbl, p in zip(labels, probs)}
+
+
 def section_fasttext(ft_path: str):
     sep("2. FASTTEXT ROUTER")
     try:
@@ -195,11 +220,7 @@ def section_fasttext(ft_path: str):
     print(f"\n{'Category':<12} {'Text':<55} {'attack':>7} {'mod':>7}")
     print("-" * 85)
     for cat, text in all_probes:
-        labels, probs = ft.predict(text, k=-1)
-        s: dict[str, float] = {}
-        for lbl, p in zip(labels, probs):
-            name = lbl.replace("__label__", "")
-            s[name] = p
+        s = _ft_predict(ft, text, k=-1)
         atk = s.get("attack", 0.0)
         mod = s.get("moderation", 0.0)
         attack_by_class[cat].append(atk)
