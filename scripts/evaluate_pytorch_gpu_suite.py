@@ -198,6 +198,11 @@ def main() -> None:
         {x.lower() for x in args.exclude_label},
         {x.lower() for x in args.include_label},
     )
+    if not rows:
+        raise SystemExit(
+            "No evaluation rows matched. Check --data paths and include/exclude labels. "
+            "Run a file count/label inspection before evaluating."
+        )
     print("[suite] sampled labels:", dict(Counter(bucket_for(set(r["labels"])) for r in rows)))
 
     started = time.perf_counter()
