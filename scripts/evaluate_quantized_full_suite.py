@@ -104,24 +104,53 @@ def unique_key(text: str) -> str:
     return " ".join(text.lower().split())[:1000]
 
 
+def raw_label_set(row: dict[str, Any]) -> set[str]:
+    values = []
+    for key in ("labels", "label", "original_labels"):
+        raw = row.get(key, [])
+        if raw is None:
+            continue
+        if isinstance(raw, (str, int, float, bool)):
+            raw = [raw]
+        values.extend(raw)
+    return {str(x).lower().strip() for x in values if str(x).strip()}
+
+
 def has_excluded_label(row: dict[str, Any], excluded: set[str]) -> bool:
-    raw = row.get("labels", row.get("label", []))
-    if raw is None:
-        raw = []
-    elif isinstance(raw, (str, int, float, bool)):
-        raw = [raw]
-    labels = {str(x).lower().strip() for x in raw or []}
-    return bool(labels & excluded)
+    return bool(raw_label_set(row) & excluded)
 
 
-def balanced_sample(paths: list[Path], limit: int, seed: int, excluded_labels: set[str] | None = None) -> list[dict[str, Any]]:
+def has_included_label(row: dict[str, Any], included: set[str]) -> bool:
+    if not included:
+        return True
+    labels = raw_label_set(row)
+    if labels & included:
+        return True
+    return "safe" in included and not labels
+
+
+def raw_label_list(row: dict[str, Any]) -> list[str]:
+    labels = raw_label_set(row)
+    return sorted(labels)
+
+
+def balanced_sample(
+    paths: list[Path],
+    limit: int,
+    seed: int,
+    excluded_labels: set[str] | None = None,
+    included_labels: set[str] | None = None,
+) -> list[dict[str, Any]]:
     rng = random.Random(seed)
     buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     seen: set[str] = set()
     excluded_labels = excluded_labels or set()
+    included_labels = included_labels or set()
     for path in paths:
         for row in read_rows(path):
             if has_excluded_label(row, excluded_labels):
+                continue
+            if not has_included_label(row, included_labels):
                 continue
             text = pick_text(row)
             if not text:
@@ -131,7 +160,13 @@ def balanced_sample(paths: list[Path], limit: int, seed: int, excluded_labels: s
                 continue
             seen.add(key)
             labels = labels_for(row)
-            rec = {"text": text, "labels": sorted(labels), "source_path": str(path)}
+            rec = {
+                "text": text,
+                "labels": sorted(labels),
+                "source_path": str(path),
+                "raw_labels": raw_label_list(row),
+                "source": str(row.get("source") or ""),
+            }
             buckets[bucket_for(labels)].append(rec)
     for rows in buckets.values():
         rng.shuffle(rows)
@@ -152,7 +187,6 @@ def balanced_sample(paths: list[Path], limit: int, seed: int, excluded_labels: s
     selected.extend(remaining[: max(0, limit - len(selected))])
     rng.shuffle(selected)
     return selected[:limit]
-
 
 def binary_metrics(gold: list[int], pred: list[int]) -> dict[str, float]:
     tp = sum(1 for g, p in zip(gold, pred) if g and p)
@@ -322,6 +356,7 @@ def main() -> None:
     p.add_argument("--output", default="reports/quantized_full_suite_5k.json")
     p.add_argument("--threshold-report", default=None, help="Calibration JSON from calibrate_quantized_thresholds.py.")
     p.add_argument("--exclude-label", action="append", default=[])
+    p.add_argument("--include-label", action="append", default=[])
     p.add_argument("--enable-fasttext-direct-classification", action="store_true")
     p.add_argument("--enable-direct-safe", action="store_true")
     p.add_argument("--fast-allow", type=float, default=None)
@@ -369,6 +404,7 @@ def main() -> None:
         args.limit,
         args.seed,
         {x.lower() for x in args.exclude_label},
+        {x.lower() for x in args.include_label},
     )
     print("[suite] sampled labels:", dict(Counter(bucket_for(set(r["labels"])) for r in rows)))
 
@@ -497,6 +533,9 @@ def main() -> None:
         "rows": len(rows),
         "sample_distribution": dict(Counter(bucket_for(set(r["labels"])) for r in rows)),
         "excluded_labels": sorted({x.lower() for x in args.exclude_label}),
+        "included_labels": sorted({x.lower() for x in args.include_label}),
+        "raw_label_distribution": dict(Counter(label for row in rows for label in row.get("raw_labels", []))),
+        "source_distribution": dict(Counter(row.get("source_path", "") for row in rows)),
         "cpu_only": True,
         "batch_size": args.batch_size,
         "max_length": max_length,

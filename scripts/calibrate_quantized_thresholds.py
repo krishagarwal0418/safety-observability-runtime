@@ -244,6 +244,7 @@ def main() -> None:
     p.add_argument("--prompt-onnx-dir", default=None)
     p.add_argument("--moderation-onnx-dir", default="models/onnx_int8/moderation")
     p.add_argument("--exclude-label", action="append", default=sorted(WEAK_DEFAULTS))
+    p.add_argument("--include-label", action="append", default=[])
     p.add_argument("--min-label-recall", type=float, default=0.85)
     p.add_argument("--label-beta", type=float, default=1.5)
     p.add_argument("--min-route-recall", type=float, default=0.97)
@@ -259,7 +260,8 @@ def main() -> None:
     )
     moderation_dir = Path(args.moderation_onnx_dir)
     excluded = {x.lower() for x in args.exclude_label}
-    rows = balanced_sample([Path(x) for x in args.data], args.limit, args.seed, excluded)
+    included = {x.lower() for x in args.include_label}
+    rows = balanced_sample([Path(x) for x in args.data], args.limit, args.seed, excluded, included)
 
     fasttext = FastTextRouter(resolve_path(cfg["models"]["fasttext_router"]["local_path"]))
     onnx_common = {
@@ -354,6 +356,11 @@ def main() -> None:
     report = {
         "rows": len(rows),
         "excluded_labels": sorted(excluded),
+        "included_labels": sorted(included),
+        "raw_label_distribution": {
+            label: sum(1 for row in rows for raw in row.get("raw_labels", []) if raw == label)
+            for label in sorted({raw for row in rows for raw in row.get("raw_labels", [])})
+        },
         "sample_distribution": {k: sum(1 for r in rows if bucket_for(set(r["labels"])) == k) for k in ("safe", PROMPT_INJECTION, HARMFUL_CONTENT, SEXUAL)},
         "targets": {
             "min_label_recall": args.min_label_recall,
