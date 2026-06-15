@@ -129,10 +129,19 @@ REGISTRIES: dict[str, list[ModelSpec]] = {
 # ---------------------------------------------------------------------------
 
 
+def _resolve_id(hf_id: str) -> str:
+    """Convert relative local paths to absolute so HF hub validation doesn't reject them."""
+    p = Path(hf_id)
+    if p.exists():
+        return str(p.resolve())
+    return hf_id
+
+
 def run_model(spec: ModelSpec, texts: list[str], device: str, batch_size: int, max_length: int) -> list[float] | None:
+    hf_id = _resolve_id(spec.hf_id)
     try:
-        tok = AutoTokenizer.from_pretrained(spec.hf_id)
-        model = AutoModelForSequenceClassification.from_pretrained(spec.hf_id).eval().to(device)
+        tok = AutoTokenizer.from_pretrained(hf_id)
+        model = AutoModelForSequenceClassification.from_pretrained(hf_id).eval().to(device)
     except Exception as e:
         print(f"  [skip] {spec.name} ({spec.hf_id}): {e}")
         return None
@@ -159,10 +168,11 @@ def run_generative_model(spec: ModelSpec, texts: list[str], device: str, max_len
     """ShieldGemma/Llama-Guard-style judge: prompt the model, read P(violation)
     from the first generated token (Yes/No or safe/unsafe)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    hf_id = _resolve_id(spec.hf_id)
     try:
-        tok = AutoTokenizer.from_pretrained(spec.hf_id)
+        tok = AutoTokenizer.from_pretrained(hf_id)
         model = AutoModelForCausalLM.from_pretrained(
-            spec.hf_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32
+            hf_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32
         ).eval().to(device)
     except Exception as e:
         print(f"  [skip] {spec.name} ({spec.hf_id}): {e}")
