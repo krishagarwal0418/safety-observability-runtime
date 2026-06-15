@@ -313,10 +313,14 @@ def main() -> None:
         cfg["models"]["moderation"]["local_path"]
     )
     fasttext = FastTextRouter(resolve_path(cfg["models"]["fasttext_router"]["local_path"]))
-    model_common = {"max_length": max_length, "device": args.device, "fp16": fp16}
+    # Calibration always runs FP32: we score ALL rows through both BERTs (not
+    # just routing-selected rows), and FP16 autocast saturates scores on
+    # out-of-distribution content (e.g. DeBERTa v3 injection scores → 1.0 for
+    # hate/sexual rows), producing useless precision numbers.
+    model_common = {"max_length": max_length, "device": args.device, "fp16": False}
     prompt_model = TorchTextClassifier(prompt_dir, sigmoid_outputs=False, **model_common)
     moderation_model = TorchTextClassifier(moderation_dir, sigmoid_outputs=True, **model_common)
-    print(f"[calibrate] prompt fp16={prompt_model.fp16}  moderation fp16={moderation_model.fp16}")
+    print(f"[calibrate] running FP32 (autocast disabled — calibration requires stable scores across all content types)")
 
     # ── Pass 1: normalize + FastText (CPU, cheap) ────────────────────────────
     started = time.perf_counter()
@@ -407,7 +411,7 @@ def main() -> None:
             label for row in rows for label in row.get("raw_labels", [])
         )),
         "device": args.device,
-        "fp16": {"prompt": prompt_model.fp16, "moderation": moderation_model.fp16},
+        "fp16": False,
         "batch_size": args.batch_size,
         "max_length": max_length,
         "targets": {
