@@ -173,6 +173,64 @@ def choose_safe_thresholds(
     return min(candidates, key=lambda c: (c["unsafe_false_pass_pct_of_unsafe"], -c["passed_rows"]))
 
 
+def choose_direct_label_threshold(
+    rows: list[dict[str, Any]],
+    ft_scores: list[dict[str, float]],
+    rule_routes: list[set[str]],
+    *,
+    score_key: str,
+    target_label: str,
+    max_other_key: str,
+    min_precision: float,
+) -> dict[str, Any]:
+    score_grid = [0.999, 0.995, 0.99, 0.98, 0.97, 0.95, 0.9, 0.85, 0.8]
+    other_grid = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05]
+    total_target = sum(1 for row in rows if target_label in row["labels"])
+    candidates = []
+    for score_thr in score_grid:
+        for max_other in other_grid:
+            pred = []
+            gold = []
+            for row, scores, forced in zip(rows, ft_scores, rule_routes):
+                hit = (
+                    not forced
+                    and scores[score_key] >= score_thr
+                    and scores[max_other_key] <= max_other
+                )
+                if hit:
+                    pred.append(1)
+                    gold.append(1 if target_label in row["labels"] else 0)
+            m = binary_metrics(gold, pred) if pred else {
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+                "tp": 0,
+                "fp": 0,
+                "fn": 0,
+                "tn": 0,
+            }
+            tp = m["tp"]
+            candidates.append(
+                {
+                    "enabled": bool(pred),
+                    "score": score_thr,
+                    "max_other": max_other,
+                    "rows": len(pred),
+                    "rows_pct": pct(len(pred), len(rows)),
+                    "precision": m["precision"],
+                    "coverage_of_label": round(tp / total_target, 4) if total_target else 0.0,
+                    "tp": tp,
+                    "fp": m["fp"],
+                }
+            )
+    valid = [c for c in candidates if c["precision"] >= min_precision and c["rows"] > 0]
+    if valid:
+        return max(valid, key=lambda c: (c["rows"], c["precision"]))
+    best = max(candidates, key=lambda c: (c["precision"], c["rows"]))
+    best["enabled"] = False
+    return best
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="configs/runtime.yaml")
@@ -188,6 +246,7 @@ def main() -> None:
     p.add_argument("--label-beta", type=float, default=1.5)
     p.add_argument("--min-route-recall", type=float, default=0.97)
     p.add_argument("--max-safe-false-pass-pct", type=float, default=1.0)
+    p.add_argument("--min-direct-precision", type=float, default=0.95)
     p.add_argument("--output", default="reports/threshold_calibration_1k.json")
     args = p.parse_args()
 
@@ -247,6 +306,24 @@ def main() -> None:
         rule_routes,
         max_false_pass_pct=args.max_safe_false_pass_pct,
     )
+    direct_prompt = choose_direct_label_threshold(
+        rows,
+        ft_scores,
+        rule_routes,
+        score_key="attack",
+        target_label=PROMPT_INJECTION,
+        max_other_key="moderation",
+        min_precision=args.min_direct_precision,
+    )
+    direct_harmful = choose_direct_label_threshold(
+        rows,
+        ft_scores,
+        rule_routes,
+        score_key="moderation",
+        target_label=HARMFUL_CONTENT,
+        max_other_key="attack",
+        min_precision=args.min_direct_precision,
+    )
     recommended_yaml = {
         "thresholds": {
             "attack_route": routing_thresholds.get("attack_route", 0.01),
@@ -257,8 +334,15 @@ def main() -> None:
             "prompt_injection_review": label_thresholds[PROMPT_INJECTION]["threshold"],
             "harmful_content_review": label_thresholds[HARMFUL_CONTENT]["threshold"],
             "sexual_review": label_thresholds[SEXUAL]["threshold"],
+            "fasttext_direct_prompt_injection_score": direct_prompt["score"] if direct_prompt["enabled"] else 1.1,
+            "fasttext_direct_prompt_injection_max_moderation": direct_prompt["max_other"],
+            "fasttext_direct_harmful_content_score": direct_harmful["score"] if direct_harmful["enabled"] else 1.1,
+            "fasttext_direct_harmful_content_max_attack": direct_harmful["max_other"],
         },
-        "runtime": {"fasttext_direct_safe_enabled": True},
+        "runtime": {
+            "fasttext_direct_safe_enabled": True,
+            "fasttext_direct_classification_enabled": True,
+        },
     }
     report = {
         "rows": len(rows),
@@ -274,6 +358,11 @@ def main() -> None:
         "label_thresholds": label_thresholds,
         "routing_thresholds": routing_thresholds,
         "safe_thresholds": safe_thresholds,
+        "direct_fasttext_thresholds": {
+            "prompt_injection": direct_prompt,
+            "harmful_content": direct_harmful,
+            "note": "router has no sexual subtype; sexual should stay with moderation BERT",
+        },
         "latency_ms": {
             "wall_total": round((time.perf_counter() - started) * 1000, 3),
             "prompt_onnx": {k: v for k, v in prompt_stats.items() if k != "token_lengths"},
@@ -296,8 +385,13 @@ def main() -> None:
                 f"  prompt_injection_review: {recommended_yaml['thresholds']['prompt_injection_review']}",
                 f"  harmful_content_review: {recommended_yaml['thresholds']['harmful_content_review']}",
                 f"  sexual_review: {recommended_yaml['thresholds']['sexual_review']}",
+                f"  fasttext_direct_prompt_injection_score: {recommended_yaml['thresholds']['fasttext_direct_prompt_injection_score']}",
+                f"  fasttext_direct_prompt_injection_max_moderation: {recommended_yaml['thresholds']['fasttext_direct_prompt_injection_max_moderation']}",
+                f"  fasttext_direct_harmful_content_score: {recommended_yaml['thresholds']['fasttext_direct_harmful_content_score']}",
+                f"  fasttext_direct_harmful_content_max_attack: {recommended_yaml['thresholds']['fasttext_direct_harmful_content_max_attack']}",
                 "runtime:",
                 "  fasttext_direct_safe_enabled: true",
+                "  fasttext_direct_classification_enabled: true",
                 "",
             ]
         ),

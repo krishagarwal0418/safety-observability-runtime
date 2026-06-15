@@ -308,6 +308,7 @@ def main() -> None:
     p.add_argument("--output", default="reports/quantized_full_suite_5k.json")
     p.add_argument("--threshold-report", default=None, help="Calibration JSON from calibrate_quantized_thresholds.py.")
     p.add_argument("--exclude-label", action="append", default=[])
+    p.add_argument("--enable-fasttext-direct-classification", action="store_true")
     p.add_argument("--enable-direct-safe", action="store_true")
     p.add_argument("--fast-allow", type=float, default=None)
     p.add_argument("--attack-route", type=float, default=None)
@@ -321,6 +322,11 @@ def main() -> None:
     if args.threshold_report:
         report = json.loads(Path(args.threshold_report).read_text(encoding="utf-8"))
         thresholds.update(report.get("recommended", {}).get("thresholds", {}))
+        recommended_runtime = report.get("recommended", {}).get("runtime", {})
+        if recommended_runtime.get("fasttext_direct_classification_enabled"):
+            args.enable_fasttext_direct_classification = True
+        if recommended_runtime.get("fasttext_direct_safe_enabled"):
+            args.enable_direct_safe = True
     if args.fast_allow is not None:
         thresholds["fast_allow"] = args.fast_allow
     if args.attack_route is not None:
@@ -358,6 +364,7 @@ def main() -> None:
     norm_latencies: list[float] = []
     prompt_token_lengths: list[int] = []
     moderation_token_lengths: list[int] = []
+    direct_stats = Counter()
 
     for i, row in enumerate(rows):
         t0 = time.perf_counter()
@@ -369,8 +376,23 @@ def main() -> None:
         ft_scores = ft["scores"]
         run_attack = ATTACK in rules.force_route or ft_scores["attack"] >= thresholds["attack_route"]
         run_moderation = MODERATION in rules.force_route or ft_scores["moderation"] >= thresholds["moderation_route"]
+        direct_prompt = (
+            args.enable_fasttext_direct_classification
+            and rules.allow_fast_skip
+            and ft_scores["attack"] >= thresholds.get("fasttext_direct_prompt_injection_score", 1.1)
+            and ft_scores["moderation"] <= thresholds.get("fasttext_direct_prompt_injection_max_moderation", 0.0)
+        )
+        direct_harmful = (
+            args.enable_fasttext_direct_classification
+            and not direct_prompt
+            and rules.allow_fast_skip
+            and ft_scores["moderation"] >= thresholds.get("fasttext_direct_harmful_content_score", 1.1)
+            and ft_scores["attack"] <= thresholds.get("fasttext_direct_harmful_content_max_attack", 0.0)
+        )
         direct_safe = (
             args.enable_direct_safe
+            and not direct_prompt
+            and not direct_harmful
             and rules.allow_fast_skip
             and ft_scores.get("safe", 0.0) >= thresholds["fasttext_direct_safe_score"]
             and ft_scores["attack"] < thresholds["fasttext_direct_safe_max_route"]
@@ -382,8 +404,17 @@ def main() -> None:
             and ft_scores["attack"] < thresholds["fast_allow"]
             and ft_scores["moderation"] < thresholds["fast_allow"]
         )
-        if direct_safe:
+        if direct_prompt:
+            pred[PROMPT_INJECTION][i] = 1
+            routing_counts["fasttext_direct_prompt_injection"] += 1
+            direct_stats["prompt_injection_tp" if PROMPT_INJECTION in row["labels"] else "prompt_injection_fp"] += 1
+        elif direct_harmful:
+            pred[HARMFUL_CONTENT][i] = 1
+            routing_counts["fasttext_direct_harmful_content"] += 1
+            direct_stats["harmful_content_tp" if HARMFUL_CONTENT in row["labels"] else "harmful_content_fp"] += 1
+        elif direct_safe:
             routing_counts["fasttext_direct_safe"] += 1
+            direct_stats["safe_fp" if row["labels"] else "safe_tn"] += 1
         elif fast_allow_safe:
             routing_counts["fasttext_fast_allow_safe"] += 1
         else:
@@ -460,8 +491,13 @@ def main() -> None:
             "moderation_route": thresholds["moderation_route"],
             "fast_allow": thresholds["fast_allow"],
             "fasttext_direct_safe_enabled": args.enable_direct_safe,
+            "fasttext_direct_classification_enabled": args.enable_fasttext_direct_classification,
             "fasttext_direct_safe_score": thresholds["fasttext_direct_safe_score"],
             "fasttext_direct_safe_max_route": thresholds["fasttext_direct_safe_max_route"],
+            "fasttext_direct_prompt_injection_score": thresholds.get("fasttext_direct_prompt_injection_score"),
+            "fasttext_direct_prompt_injection_max_moderation": thresholds.get("fasttext_direct_prompt_injection_max_moderation"),
+            "fasttext_direct_harmful_content_score": thresholds.get("fasttext_direct_harmful_content_score"),
+            "fasttext_direct_harmful_content_max_attack": thresholds.get("fasttext_direct_harmful_content_max_attack"),
             "prompt_injection_review": thresholds["prompt_injection_review"],
             "harmful_content_review": thresholds["harmful_content_review"],
             "sexual_review": thresholds["sexual_review"],
@@ -479,11 +515,37 @@ def main() -> None:
             "moderation_bert_rows": len(route_indices["moderation"]),
             "any_bert_rows": sum(routed_any),
             "any_bert_pct": pct(sum(routed_any), len(rows)),
-            "fasttext_direct_classified_rows": routing_counts["fasttext_direct_safe"] + routing_counts["fasttext_fast_allow_safe"],
+            "fasttext_direct_classified_rows": (
+                routing_counts["fasttext_direct_prompt_injection"]
+                + routing_counts["fasttext_direct_harmful_content"]
+                + routing_counts["fasttext_direct_safe"]
+                + routing_counts["fasttext_fast_allow_safe"]
+            ),
             "fasttext_direct_classified_pct": pct(
-                routing_counts["fasttext_direct_safe"] + routing_counts["fasttext_fast_allow_safe"], len(rows)
+                routing_counts["fasttext_direct_prompt_injection"]
+                + routing_counts["fasttext_direct_harmful_content"]
+                + routing_counts["fasttext_direct_safe"]
+                + routing_counts["fasttext_fast_allow_safe"],
+                len(rows),
+            ),
+            "fasttext_direct_unsafe_rows": (
+                routing_counts["fasttext_direct_prompt_injection"]
+                + routing_counts["fasttext_direct_harmful_content"]
             ),
             "route_any_bert_vs_unsafe": binary_metrics(unsafe, routed_any),
+            "fasttext_direct_precision": {
+                "prompt_injection": round(
+                    direct_stats["prompt_injection_tp"]
+                    / max(1, direct_stats["prompt_injection_tp"] + direct_stats["prompt_injection_fp"]),
+                    4,
+                ),
+                "harmful_content": round(
+                    direct_stats["harmful_content_tp"]
+                    / max(1, direct_stats["harmful_content_tp"] + direct_stats["harmful_content_fp"]),
+                    4,
+                ),
+                "safe_false_pass_rows": direct_stats["safe_fp"],
+            },
         },
         "latency_ms": {
             "wall_total": round(elapsed_ms, 3),
