@@ -184,16 +184,21 @@ python scripts/evaluate_scope_hf.py \
   --config configs/runtime.yaml \
   --rows-per-label 200 \
   --max-length 512 \
-  --batch-size 64 \
+  --prompt-batch-size 64 \
+  --moderation-batch-size 128 \
   --device cuda \
-  --onnx-provider auto \
+  --onnx-provider cpu \
+  --parallel \
   --output reports/scope_hf_eval.json
 ```
 
 The suite samples prompt-injection, toxic/hate/spam, and safe rows from public
 HF datasets and reports precision/recall/F1, confusion matrix, per-source
 counts, batched latency, throughput, active ONNX providers, and tokenizer length
-percentiles. Increase `--batch-size` for better GPU utilization if memory allows.
+percentiles. The recommended Colab mode is `--device cuda --onnx-provider cpu
+--parallel`: prompt-injection DeBERTa uses the GPU while MiniLM moderation uses
+the CPU at the same time. Increase `--prompt-batch-size` for better GPU
+utilization if memory allows.
 
 Keep `fast_allow: 0.0` and `fasttext_direct_safe_enabled: false` unless a fresh
 calibration proves the unsafe false-pass rate is acceptable.

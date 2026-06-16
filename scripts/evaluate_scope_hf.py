@@ -19,6 +19,7 @@ import tempfile
 import time
 import sys
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +188,40 @@ def summarize_values(values: list[float]) -> dict[str, float]:
     }
 
 
+def run_batched_models(clf, texts: list[str], *, prompt_batch_size: int, moderation_batch_size: int, parallel: bool):
+    if parallel:
+        print(
+            "[eval] parallel batched inference "
+            f"rows={len(texts)} prompt_batch_size={prompt_batch_size} "
+            f"moderation_batch_size={moderation_batch_size}"
+        )
+        started = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            prompt_future = pool.submit(
+                clf.prompt_injection.classify_batch,
+                texts,
+                batch_size=prompt_batch_size,
+            )
+            moderation_future = pool.submit(
+                clf.moderation.classify_batch,
+                texts,
+                batch_size=moderation_batch_size,
+            )
+            prompt_out = prompt_future.result()
+            moderation_out = moderation_future.result()
+        return prompt_out, moderation_out, time.perf_counter() - started
+
+    print(
+        "[eval] serial batched inference "
+        f"rows={len(texts)} prompt_batch_size={prompt_batch_size} "
+        f"moderation_batch_size={moderation_batch_size}"
+    )
+    started = time.perf_counter()
+    prompt_out = clf.prompt_injection.classify_batch(texts, batch_size=prompt_batch_size)
+    moderation_out = clf.moderation.classify_batch(texts, batch_size=moderation_batch_size)
+    return prompt_out, moderation_out, time.perf_counter() - started
+
+
 def write_eval_config(args: argparse.Namespace) -> str:
     cfg = load_config(args.config)
     if args.local_hf_upload:
@@ -230,6 +265,9 @@ def main() -> None:
     parser.add_argument("--onnx-provider", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--prompt-batch-size", type=int, default=None)
+    parser.add_argument("--moderation-batch-size", type=int, default=None)
+    parser.add_argument("--parallel", action="store_true", help="run prompt model and moderation model concurrently")
     parser.add_argument("--warmup-rows", type=int, default=8)
     parser.add_argument("--include-raw", action="store_true")
     parser.add_argument("--local-hf-upload", default=None, help="use local hf_upload artifacts for private models")
@@ -239,6 +277,8 @@ def main() -> None:
     rows = assemble(args.rows_per_label, args.seed)
     eval_config = write_eval_config(args)
     clf = SafetyObservabilityClassifier(eval_config)
+    prompt_batch_size = args.prompt_batch_size or args.batch_size
+    moderation_batch_size = args.moderation_batch_size or args.batch_size
 
     prompt_tokenizer = clf.prompt_injection.tokenizer
     moderation_tokenizer = getattr(clf.moderation, "tokenizer", None)
@@ -258,14 +298,16 @@ def main() -> None:
     warmup_texts = texts[: max(0, min(args.warmup_rows, len(texts)))]
     if warmup_texts:
         print(f"[warmup] {len(warmup_texts)} rows")
-        clf.prompt_injection.classify_batch(warmup_texts, batch_size=min(args.batch_size, len(warmup_texts)))
-        clf.moderation.classify_batch(warmup_texts, batch_size=min(args.batch_size, len(warmup_texts)))
+        clf.prompt_injection.classify_batch(warmup_texts, batch_size=min(prompt_batch_size, len(warmup_texts)))
+        clf.moderation.classify_batch(warmup_texts, batch_size=min(moderation_batch_size, len(warmup_texts)))
 
-    print(f"[eval] batched inference rows={len(texts)} batch_size={args.batch_size}")
-    started = time.perf_counter()
-    prompt_out = clf.prompt_injection.classify_batch(texts, batch_size=args.batch_size)
-    moderation_out = clf.moderation.classify_batch(texts, batch_size=args.batch_size)
-    elapsed = time.perf_counter() - started
+    prompt_out, moderation_out, elapsed = run_batched_models(
+        clf,
+        texts,
+        prompt_batch_size=prompt_batch_size,
+        moderation_batch_size=moderation_batch_size,
+        parallel=args.parallel,
+    )
 
     prompt_scores = prompt_out["scores"]
     harmful_scores = moderation_out["scores"]
@@ -319,7 +361,10 @@ def main() -> None:
         "onnx_provider_requested": args.onnx_provider,
         "onnx_providers_active": providers,
         "max_length": args.max_length,
+        "parallel": args.parallel,
         "batch_size": args.batch_size,
+        "prompt_batch_size": prompt_batch_size,
+        "moderation_batch_size": moderation_batch_size,
         "warmup_rows": len(warmup_texts),
         "thresholds": {
             "prompt_injection_review": clf.config["thresholds"]["prompt_injection_review"],
