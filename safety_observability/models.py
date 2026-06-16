@@ -80,6 +80,42 @@ class HFClassifier:
             for i in range(len(probs))
         }, round((time.time() - started) * 1000, 3)
 
+    def _raw_probs_batch(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int = 64,
+        sigmoid: bool = False,
+    ) -> tuple[list[dict[str, float]], float, list[float]]:
+        rows: list[dict[str, float]] = []
+        batch_latencies: list[float] = []
+        total_started = time.time()
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            enc = self.tokenizer(
+                batch,
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=self.max_length,
+            )
+            if self.device == "cuda":
+                enc = {k: v.to("cuda") for k, v in enc.items()}
+                torch.cuda.synchronize()
+            started = time.time()
+            with torch.inference_mode():
+                logits = self.model(**enc).logits.float().detach().cpu()
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+            batch_latencies.append(round((time.time() - started) * 1000, 3))
+            probs = torch.sigmoid(logits) if sigmoid else torch.softmax(logits, dim=-1)
+            for row in probs:
+                rows.append({
+                    self.id2label.get(i, f"LABEL_{i}"): float(row[i])
+                    for i in range(len(row))
+                })
+        return rows, round((time.time() - total_started) * 1000, 3), batch_latencies
+
 
 class PromptInjectionModel(HFClassifier):
     def classify(self, text: str) -> dict[str, Any]:
@@ -92,6 +128,25 @@ class PromptInjectionModel(HFClassifier):
             elif label == "LABEL_1":
                 score = max(score, prob)
         return {"scores": {C.PROMPT_INJECTION: score}, "raw": raw, "latency_ms": latency}
+
+    def classify_batch(self, texts: list[str], *, batch_size: int = 64) -> dict[str, Any]:
+        raw_rows, total_latency, batch_latencies = self._raw_probs_batch(texts, batch_size=batch_size)
+        scores: list[float] = []
+        for raw in raw_rows:
+            score = 0.0
+            for label, prob in raw.items():
+                low = label.lower()
+                if any(tok in low for tok in ("injection", "malicious", "attack", "unsafe")):
+                    score = max(score, prob)
+                elif label == "LABEL_1":
+                    score = max(score, prob)
+            scores.append(score)
+        return {
+            "scores": scores,
+            "raw": raw_rows,
+            "latency_ms": total_latency,
+            "batch_latencies_ms": batch_latencies,
+        }
 
 
 class JailbreakModel(HFClassifier):
@@ -194,4 +249,41 @@ class MiniLMToxicSpamONNXModel:
             "scores": {C.HARMFUL_CONTENT: harmful, C.SEXUAL: 0.0},
             "raw": {"scores": raw, "providers": self.session.get_providers()},
             "latency_ms": latency,
+        }
+
+    def classify_batch(self, texts: list[str], *, batch_size: int = 64) -> dict[str, Any]:
+        raw_rows: list[dict[str, float]] = []
+        harmful_scores: list[float] = []
+        batch_latencies: list[float] = []
+        total_started = time.time()
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            enc = self.tokenizer(
+                batch,
+                return_tensors="np",
+                truncation=True,
+                padding=True,
+                max_length=self.max_length,
+            )
+            feed = {key: value for key, value in enc.items() if key in self.input_names}
+            started = time.time()
+            logits = self.session.run(None, feed)[0]
+            batch_latencies.append(round((time.time() - started) * 1000, 3))
+            probs = _softmax(logits)
+            for row in probs:
+                raw = {
+                    self.id2label.get(i, f"LABEL_{i}"): float(row[i])
+                    for i in range(len(row))
+                }
+                raw_rows.append(raw)
+                harmful_scores.append(max(
+                    (prob for label, prob in raw.items() if label.lower() in self.harmful_labels),
+                    default=0.0,
+                ))
+        return {
+            "scores": harmful_scores,
+            "raw": raw_rows,
+            "providers": self.session.get_providers(),
+            "latency_ms": round((time.time() - total_started) * 1000, 3),
+            "batch_latencies_ms": batch_latencies,
         }

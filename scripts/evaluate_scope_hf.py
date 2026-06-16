@@ -229,6 +229,8 @@ def main() -> None:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--onnx-provider", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--warmup-rows", type=int, default=8)
     parser.add_argument("--include-raw", action="store_true")
     parser.add_argument("--local-hf-upload", default=None, help="use local hf_upload artifacts for private models")
     parser.add_argument("--output", default=str(REPO / "reports/scope_hf_eval.json"))
@@ -243,28 +245,43 @@ def main() -> None:
 
     confusion: dict[str, dict[str, int]] = {label: defaultdict(int) for label in LABELS}
     per_source: dict[str, Counter] = defaultdict(Counter)
-    latencies: list[float] = []
     prompt_tokens: list[float] = []
     moderation_tokens: list[float] = []
-    triggered_counts: Counter = Counter()
     errors: list[dict[str, Any]] = []
 
-    started = time.perf_counter()
-    for i, row in enumerate(rows, start=1):
-        text = row["text"]
+    texts = [row["text"] for row in rows]
+    for text in texts:
         prompt_tokens.append(len(prompt_tokenizer(text, truncation=False, verbose=False)["input_ids"]))
         if moderation_tokenizer is not None:
             moderation_tokens.append(len(moderation_tokenizer(text, truncation=False, verbose=False)["input_ids"]))
 
-        result = clf.classify(text, full_scan=True, include_raw=args.include_raw)
-        latencies.append(float(result["latency_ms"]))
-        for model_name in result["triggered_models"]:
-            triggered_counts[model_name] += 1
+    warmup_texts = texts[: max(0, min(args.warmup_rows, len(texts)))]
+    if warmup_texts:
+        print(f"[warmup] {len(warmup_texts)} rows")
+        clf.prompt_injection.classify_batch(warmup_texts, batch_size=min(args.batch_size, len(warmup_texts)))
+        clf.moderation.classify_batch(warmup_texts, batch_size=min(args.batch_size, len(warmup_texts)))
+
+    print(f"[eval] batched inference rows={len(texts)} batch_size={args.batch_size}")
+    started = time.perf_counter()
+    prompt_out = clf.prompt_injection.classify_batch(texts, batch_size=args.batch_size)
+    moderation_out = clf.moderation.classify_batch(texts, batch_size=args.batch_size)
+    elapsed = time.perf_counter() - started
+
+    prompt_scores = prompt_out["scores"]
+    harmful_scores = moderation_out["scores"]
+    thresholds = clf.config["thresholds"]
+
+    for i, row in enumerate(rows):
+        labels = []
+        if prompt_scores[i] >= thresholds["prompt_injection_review"]:
+            labels.append(C.PROMPT_INJECTION)
+        if harmful_scores[i] >= thresholds["harmful_content_review"]:
+            labels.append(C.HARMFUL_CONTENT)
 
         pred = C.SAFE
-        if C.PROMPT_INJECTION in result["labels"]:
+        if C.PROMPT_INJECTION in labels:
             pred = C.PROMPT_INJECTION
-        elif C.HARMFUL_CONTENT in result["labels"]:
+        elif C.HARMFUL_CONTENT in labels:
             pred = C.HARMFUL_CONTENT
         confusion[row["true_label"]][pred] += 1
         per_source[row["source"]][f"true:{row['true_label']}"] += 1
@@ -276,13 +293,12 @@ def main() -> None:
                 "pred_label": pred,
                 "source": row["source"],
                 "subtype": row.get("subtype"),
-                "scores": result["scores"],
-                "text_preview": text[:180],
+                "scores": {
+                    C.PROMPT_INJECTION: round(float(prompt_scores[i]), 4),
+                    C.HARMFUL_CONTENT: round(float(harmful_scores[i]), 4),
+                },
+                "text_preview": row["text"][:180],
             })
-        if i % 50 == 0:
-            print(f"[eval] {i}/{len(rows)} rows")
-
-    elapsed = time.perf_counter() - started
 
     per_label = {}
     for label in LABELS:
@@ -303,6 +319,8 @@ def main() -> None:
         "onnx_provider_requested": args.onnx_provider,
         "onnx_providers_active": providers,
         "max_length": args.max_length,
+        "batch_size": args.batch_size,
+        "warmup_rows": len(warmup_texts),
         "thresholds": {
             "prompt_injection_review": clf.config["thresholds"]["prompt_injection_review"],
             "harmful_content_review": clf.config["thresholds"]["harmful_content_review"],
@@ -312,7 +330,14 @@ def main() -> None:
         "per_label": per_label,
         "confusion": {label: dict(confusion[label]) for label in LABELS},
         "per_source": {source: dict(counts) for source, counts in per_source.items()},
-        "latency_ms": summarize_values(latencies),
+        "latency": {
+            "batched_wall_seconds": round(elapsed, 3),
+            "effective_ms_per_row": round((elapsed * 1000) / max(1, len(rows)), 3),
+            "prompt_injection_total_ms": round(float(prompt_out["latency_ms"]), 3),
+            "moderation_total_ms": round(float(moderation_out["latency_ms"]), 3),
+            "prompt_injection_batch_ms": summarize_values(prompt_out["batch_latencies_ms"]),
+            "moderation_batch_ms": summarize_values(moderation_out["batch_latencies_ms"]),
+        },
         "throughput_rows_per_sec": round(len(rows) / elapsed if elapsed else 0.0, 3),
         "token_lengths": {
             "prompt_injection_tokenizer": summarize_values(prompt_tokens),
@@ -320,7 +345,10 @@ def main() -> None:
             "prompt_rows_over_max_length": sum(1 for value in prompt_tokens if value > args.max_length),
             "moderation_rows_over_max_length": sum(1 for value in moderation_tokens if value > args.max_length),
         },
-        "triggered_models": dict(triggered_counts),
+        "triggered_models": {
+            "prompt_injection": len(rows),
+            "moderation": len(rows),
+        },
         "error_samples": errors,
         "datasets": [
             "xTRam1/safe-guard-prompt-injection",
@@ -340,7 +368,7 @@ def main() -> None:
             f"F1={metric['f1']:.4f} TP/FP/FN={metric['tp']}/{metric['fp']}/{metric['fn']}"
         )
     print(f"macro_f1={macro_f1:.4f}")
-    print(f"latency_ms={result['latency_ms']}")
+    print(f"latency={result['latency']}")
     print(f"throughput_rows_per_sec={result['throughput_rows_per_sec']}")
     print(f"prompt_tokens={result['token_lengths']['prompt_injection_tokenizer']}")
     print(f"moderation_tokens={result['token_lengths']['moderation_tokenizer']}")
