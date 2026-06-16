@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import statistics
 import tempfile
@@ -222,26 +223,60 @@ def run_batched_models(clf, texts: list[str], *, prompt_batch_size: int, moderat
     return prompt_out, moderation_out, time.perf_counter() - started
 
 
+def _resolve_local(path: str) -> Path:
+    local = Path(path)
+    return local if local.is_absolute() else REPO / local
+
+
+def _has_hf_weights(local: Path) -> bool:
+    return (
+        (local / "model.safetensors").exists()
+        or (local / "pytorch_model.bin").exists()
+        or any(local.glob("model-*.safetensors"))
+        or any(local.glob("pytorch_model-*.bin"))
+    )
+
+
+def ensure_snapshot(repo_id: str, local: Path, *, allow_patterns: list[str] | None = None, private: bool = False) -> None:
+    if allow_patterns is None and _has_hf_weights(local):
+        return
+    if allow_patterns is not None and all((local / pattern).exists() for pattern in allow_patterns):
+        return
+    from huggingface_hub import snapshot_download
+
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if private and not token:
+        raise SystemExit(
+            f"ERROR: {repo_id} is private. Set HF_TOKEN before running this eval."
+        )
+    print(f"[download] {repo_id} -> {local}")
+    snapshot_download(
+        repo_id,
+        local_dir=str(local),
+        token=token,
+        allow_patterns=allow_patterns,
+    )
+
+
 def write_eval_config(args: argparse.Namespace) -> str:
     cfg = load_config(args.config)
     if args.local_hf_upload:
         root = Path(args.local_hf_upload).resolve()
         cfg["models"]["fasttext_router"]["local_path"] = str(root / "safety-fasttext-router" / "router_head.ftz")
         cfg["models"]["prompt_injection"]["local_path"] = str(root / "safety-prompt-injection")
+
+    prompt_spec = cfg["models"]["prompt_injection"]
+    prompt_local = _resolve_local(prompt_spec["local_path"])
+    ensure_snapshot(prompt_spec["repo_id"], prompt_local, private=True)
+
     moderation_spec = cfg["models"].get("moderation", {})
     if moderation_spec.get("backend") == "minilm_toxic_spam_onnx":
-        local = Path(moderation_spec["local_path"])
-        if not local.is_absolute():
-            local = REPO / local
-        if not (local / "onnx" / "model.onnx").exists():
-            from huggingface_hub import snapshot_download
-
-            print(f"[download] moderation: {moderation_spec['repo_id']} -> {local}")
-            snapshot_download(
-                moderation_spec["repo_id"],
-                local_dir=str(local),
-                allow_patterns=["config.json", "tokenizer.json", "tokenizer_config.json", "onnx/model.onnx"],
-            )
+        local = _resolve_local(moderation_spec["local_path"])
+        ensure_snapshot(
+            moderation_spec["repo_id"],
+            local,
+            allow_patterns=["config.json", "tokenizer.json", "tokenizer_config.json", "onnx/model.onnx"],
+        )
     cfg.setdefault("runtime", {}).update({
         "device": args.device,
         "onnx_provider": args.onnx_provider,
