@@ -349,6 +349,8 @@ def main() -> None:
     parser.add_argument("--prompt-batch-size", type=int, default=None)
     parser.add_argument("--moderation-batch-size", type=int, default=None)
     parser.add_argument("--parallel", action="store_true", help="run prompt model and moderation model concurrently")
+    parser.add_argument("--no-length-sort", dest="length_sort", action="store_false",
+                        help="disable length bucketing before batched inference")
     parser.add_argument("--warmup-rows", type=int, default=8)
     parser.add_argument("--include-raw", action="store_true")
     parser.add_argument("--local-hf-upload", default=None, help="use local hf_upload artifacts for private models")
@@ -375,6 +377,20 @@ def main() -> None:
         prompt_tokens.append(len(prompt_tokenizer(text, truncation=False, verbose=False)["input_ids"]))
         if moderation_tokenizer is not None:
             moderation_tokens.append(len(moderation_tokenizer(text, truncation=False, verbose=False)["input_ids"]))
+
+    if args.length_sort:
+        order = sorted(
+            range(len(rows)),
+            key=lambda i: max(
+                prompt_tokens[i],
+                moderation_tokens[i] if i < len(moderation_tokens) else 0,
+            ),
+        )
+        rows = [rows[i] for i in order]
+        texts = [texts[i] for i in order]
+        prompt_tokens = [prompt_tokens[i] for i in order]
+        moderation_tokens = [moderation_tokens[i] for i in order] if moderation_tokens else moderation_tokens
+        print("[eval] length bucketing enabled")
 
     warmup_texts = texts[: max(0, min(args.warmup_rows, len(texts)))]
     if warmup_texts:
@@ -443,6 +459,7 @@ def main() -> None:
         "onnx_providers_active": providers,
         "max_length": args.max_length,
         "parallel": args.parallel,
+        "length_sort": args.length_sort,
         "batch_size": args.batch_size,
         "prompt_batch_size": prompt_batch_size,
         "moderation_batch_size": moderation_batch_size,
