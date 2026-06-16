@@ -8,13 +8,22 @@ from . import constants as C
 from .config import load_config, resolve_path
 from .deterministic import ATTACK, MODERATION, evaluate as deterministic_gate
 from .fasttext_router import FastTextRouter
-from .models import ModerationModel, PromptInjectionModel, resolve_device
+from .models import MiniLMToxicSpamONNXModel, ModerationModel, PromptInjectionModel, resolve_device
 from .normalize import normalize
 
 
 class SafetyObservabilityClassifier:
-    def __init__(self, config_path: str | None = None) -> None:
+    def __init__(
+        self,
+        config_path: str | None = None,
+        *,
+        runtime_overrides: dict[str, Any] | None = None,
+    ) -> None:
         self.config = load_config(config_path)
+        if runtime_overrides:
+            self.config.setdefault("runtime", {}).update(
+                {key: value for key, value in runtime_overrides.items() if value is not None}
+            )
         runtime = self.config.get("runtime", {})
         self.device = resolve_device(runtime.get("device", "cuda"))
         self.max_length = int(runtime.get("max_length", 128))
@@ -27,7 +36,16 @@ class SafetyObservabilityClassifier:
             "fp16_on_cuda": self.fp16_on_cuda,
         }
         self.prompt_injection = PromptInjectionModel(str(resolve_path(models["prompt_injection"]["local_path"])), **common)
-        self.moderation = ModerationModel(str(resolve_path(models["moderation"]["local_path"])), **common)
+        moderation_spec = models["moderation"]
+        moderation_cls = (
+            MiniLMToxicSpamONNXModel
+            if moderation_spec.get("backend") == "minilm_toxic_spam_onnx"
+            else ModerationModel
+        )
+        moderation_kwargs = dict(common)
+        if moderation_spec.get("backend") == "minilm_toxic_spam_onnx":
+            moderation_kwargs["onnx_provider"] = runtime.get("onnx_provider", "auto")
+        self.moderation = moderation_cls(str(resolve_path(moderation_spec["local_path"])), **moderation_kwargs)
 
     def classify(self, text: str, *, full_scan: bool | None = None, include_raw: bool = False) -> dict[str, Any]:
         started = time.time()
@@ -104,7 +122,7 @@ class SafetyObservabilityClassifier:
             scores[C.HARMFUL_CONTENT] = max(scores[C.HARMFUL_CONTENT], 1.0)
 
         labels = []
-        # Injection is vetoed when the moderation BERT marks the row strongly
+        # Injection is vetoed when the moderation scorer marks the row strongly
         # harmful: the injection model confuses toxic content with attacks, but
         # real injections stay low on moderation. If moderation did not run,
         # scores[HARMFUL_CONTENT] is 0.0 and the veto is a no-op.

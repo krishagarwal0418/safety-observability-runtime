@@ -6,7 +6,7 @@ models:
     local_path: "models/fasttext/router_head.ftz"
 
   prompt_injection:
-    # Replace with your fine-tuned/quantized prompt-injection repo if uploaded.
+    # Fine-tuned prompt-injection detector.
     repo_id: "Krishagarwal314/safety-prompt-injection"
     local_path: "models/transformers/prompt_injection"
 
@@ -14,22 +14,26 @@ models:
     # Optional artifact for deployment experiments; runtime uses prompt_injection above by default.
     repo_id: "Krishagarwal314/safety-prompt-injection-onnx-int8"
     local_path: "models/onnx_int8/prompt_injection"
+    download: false
 
   moderation:
-    # Replace with your fine-tuned 2-label Koala merged moderation repo.
-    repo_id: "Krishagarwal314/safety-moderation-2head"
-    local_path: "models/transformers/moderation"
+    # MiniLM ONNX toxic/spam classifier. Scope: harmful_content only
+    # (toxic/spam -> harmful_content); sexual is intentionally unsupported.
+    repo_id: "navodPeiris/minilm-toxic-spam-classifier"
+    local_path: "models/onnx/minilm_toxic_spam"
+    backend: "minilm_toxic_spam_onnx"
 
   moderation_onnx_int8:
-    # Optional artifact for CPU batch evaluation/deployment experiments.
+    # Legacy optional artifact for CPU batch evaluation/deployment experiments.
     repo_id: "Krishagarwal314/safety-moderation-2head-onnx-int8"
     local_path: "models/onnx_int8/moderation"
+    download: false
 
 thresholds:
   # Calibrated on the narrowed observability scope:
-  # prompt-injection/attack, toxicity, hate, harassment, sexual, and safe.
-  # Violence, self-harm, dangerous information, and illegal activity are not
-  # claimed as supported by these thresholds.
+  # prompt-injection/attack, MiniLM toxic/spam, and safe. Sexual, violence,
+  # self-harm, dangerous information, and illegal activity are not claimed as
+  # supported by these thresholds.
   attack_route: 0.01
   moderation_route: 0.0
   fast_allow: 0.0
@@ -44,30 +48,31 @@ thresholds:
   fasttext_direct_safe_score: 1.1
   fasttext_direct_safe_max_route: 0.0
 
-  # BERT score thresholds — calibrated on clean held-out benchmarks.
+  # Model score thresholds.
   #
   # Injection (0.50): well-calibrated at default on clean eval (safe-guard
   # F1=0.993, SPML F1=0.996). No adjustment needed.
   #
-  # Moderation (0.93): temperature-scaling calibration (T=3.693) on
-  # ucberkeley-dlab/measuring-hate-speech + google/civil_comments found
-  # optimal threshold = 0.67 on sigmoid(logit/T), equivalent to 0.93 on
-  # the raw sigmoid output. At 0.40 the model fires on 73% of benign JBB
-  # goals (false positives); at 0.93 precision improves substantially while
-  # recall stays high (0.82). See reports/calibration_moderation.json.
+  # Moderation (0.83): calibrated for navodPeiris/minilm-toxic-spam-classifier
+  # on the harmful-vs-safe bakeoff in reports/moderation_candidate_compare.json.
+  # This model has no sexual head; sexual_review is disabled with an impossible
+  # threshold and the runtime adapter emits sexual=0.0.
   prompt_injection_review: 0.50
-  harmful_content_review: 0.93
-  sexual_review: 0.93
+  harmful_content_review: 0.83
+  sexual_review: 1.10
 
   # Injection veto: a row is only labelled prompt_injection if the injection
-  # score clears prompt_injection_review AND the moderation BERT's harmful score
-  # stays below this cap. Real injections are high-attack + low-moderation;
-  # toxic content the injection model mistakes for an attack is high on both,
-  # so this veto suppresses those false positives. 1.01 = veto disabled.
+  # score clears prompt_injection_review AND the moderation harmful score stays
+  # below this cap. Real injections are high-attack + low-moderation; toxic
+  # content the injection model mistakes for an attack is high on both, so this
+  # veto suppresses those false positives. 1.01 = veto disabled.
   prompt_injection_max_harmful: 1.01
 
 runtime:
   device: "cuda"
+  # ONNX provider for MiniLM moderation: auto | cpu | cuda. "auto" uses CUDA
+  # when onnxruntime-gpu is installed, otherwise CPUExecutionProvider.
+  onnx_provider: "auto"
   max_length: 128
   fp16_on_cuda: true
   full_scan_default: true

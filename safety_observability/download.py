@@ -16,6 +16,9 @@ def download_models(config_path: str | None = None) -> dict[str, str]:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     out: dict[str, str] = {}
     for name, spec in cfg["models"].items():
+        if spec.get("download") is False:
+            print(f"[download] skip {name}: download=false")
+            continue
         local = resolve_path(spec["local_path"])
         repo_id = spec.get("repo_id")
         if not repo_id:
