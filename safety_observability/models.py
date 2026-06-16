@@ -86,6 +86,7 @@ class HFClassifier:
         *,
         batch_size: int = 64,
         sigmoid: bool = False,
+        include_raw: bool = False,
     ) -> tuple[list[dict[str, float]], float, list[float]]:
         rows: list[dict[str, float]] = []
         batch_latencies: list[float] = []
@@ -110,10 +111,13 @@ class HFClassifier:
             batch_latencies.append(round((time.time() - started) * 1000, 3))
             probs = torch.sigmoid(logits) if sigmoid else torch.softmax(logits, dim=-1)
             for row in probs:
-                rows.append({
-                    self.id2label.get(i, f"LABEL_{i}"): float(row[i])
-                    for i in range(len(row))
-                })
+                if include_raw:
+                    rows.append({
+                        self.id2label.get(i, f"LABEL_{i}"): float(row[i])
+                        for i in range(len(row))
+                    })
+                else:
+                    rows.append({f"LABEL_{i}": float(row[i]) for i in range(len(row))})
         return rows, round((time.time() - total_started) * 1000, 3), batch_latencies
 
 
@@ -129,8 +133,12 @@ class PromptInjectionModel(HFClassifier):
                 score = max(score, prob)
         return {"scores": {C.PROMPT_INJECTION: score}, "raw": raw, "latency_ms": latency}
 
-    def classify_batch(self, texts: list[str], *, batch_size: int = 64) -> dict[str, Any]:
-        raw_rows, total_latency, batch_latencies = self._raw_probs_batch(texts, batch_size=batch_size)
+    def classify_batch(self, texts: list[str], *, batch_size: int = 64, include_raw: bool = False) -> dict[str, Any]:
+        raw_rows, total_latency, batch_latencies = self._raw_probs_batch(
+            texts,
+            batch_size=batch_size,
+            include_raw=include_raw,
+        )
         scores: list[float] = []
         for raw in raw_rows:
             score = 0.0
@@ -143,7 +151,7 @@ class PromptInjectionModel(HFClassifier):
             scores.append(score)
         return {
             "scores": scores,
-            "raw": raw_rows,
+            "raw": raw_rows if include_raw else None,
             "latency_ms": total_latency,
             "batch_latencies_ms": batch_latencies,
         }
@@ -251,7 +259,7 @@ class MiniLMToxicSpamONNXModel:
             "latency_ms": latency,
         }
 
-    def classify_batch(self, texts: list[str], *, batch_size: int = 64) -> dict[str, Any]:
+    def classify_batch(self, texts: list[str], *, batch_size: int = 64, include_raw: bool = False) -> dict[str, Any]:
         raw_rows: list[dict[str, float]] = []
         harmful_scores: list[float] = []
         batch_latencies: list[float] = []
@@ -271,18 +279,16 @@ class MiniLMToxicSpamONNXModel:
             batch_latencies.append(round((time.time() - started) * 1000, 3))
             probs = _softmax(logits)
             for row in probs:
-                raw = {
-                    self.id2label.get(i, f"LABEL_{i}"): float(row[i])
-                    for i in range(len(row))
-                }
-                raw_rows.append(raw)
+                raw = {self.id2label.get(i, f"LABEL_{i}"): float(row[i]) for i in range(len(row))}
+                if include_raw:
+                    raw_rows.append(raw)
                 harmful_scores.append(max(
                     (prob for label, prob in raw.items() if label.lower() in self.harmful_labels),
                     default=0.0,
                 ))
         return {
             "scores": harmful_scores,
-            "raw": raw_rows,
+            "raw": raw_rows if include_raw else None,
             "providers": self.session.get_providers(),
             "latency_ms": round((time.time() - total_started) * 1000, 3),
             "batch_latencies_ms": batch_latencies,

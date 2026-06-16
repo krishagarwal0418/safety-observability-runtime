@@ -36,11 +36,11 @@ from safety_observability.pipeline import SafetyObservabilityClassifier
 LABELS = ("prompt_injection", "harmful_content", "safe")
 
 
-def _text_column(df, candidates: tuple[str, ...]) -> str:
+def _first_present(columns: list[str], candidates: tuple[str, ...]) -> str:
     for candidate in candidates:
-        if candidate in df.columns:
+        if candidate in columns:
             return candidate
-    raise KeyError(f"none of these text columns exist: {candidates}; got {list(df.columns)}")
+    raise KeyError(f"none of these columns exist: {candidates}; got {columns}")
 
 
 def _sample(items: list[dict[str, Any]], n: int, rng: random.Random) -> list[dict[str, Any]]:
@@ -52,87 +52,133 @@ def load_prompt_injection(n: int, rng: random.Random) -> list[dict[str, Any]]:
     from datasets import load_dataset
 
     rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
-    sg = load_dataset("xTRam1/safe-guard-prompt-injection", split="train").to_pandas()
-    sg = sg[(sg["label"] == 1) & (sg["text"].str.strip() != "")]
-    for text in sg["text"].drop_duplicates().tolist():
+    sg = load_dataset("xTRam1/safe-guard-prompt-injection", split="train")
+    sg = sg.shuffle(seed=rng.randint(0, 2**31 - 1))
+    for row in sg:
+        text = (row.get("text") or "").strip()
+        if row.get("label") != 1 or not text or text in seen:
+            continue
+        seen.add(text)
         rows.append({
             "text": text,
             "true_label": C.PROMPT_INJECTION,
             "source": "xTRam1/safe-guard-prompt-injection",
         })
+        if len(rows) >= n:
+            return rows
 
-    spml = load_dataset("reshabhs/SPML_Chatbot_Prompt_Injection", split="train").to_pandas()
-    spml = spml[(spml["Prompt injection"] == 1) & (spml["User Prompt"].str.strip() != "")]
-    for text in spml["User Prompt"].drop_duplicates().tolist():
+    spml = load_dataset("reshabhs/SPML_Chatbot_Prompt_Injection", split="train")
+    spml = spml.shuffle(seed=rng.randint(0, 2**31 - 1))
+    for row in spml:
+        text = (row.get("User Prompt") or "").strip()
+        if row.get("Prompt injection") != 1 or not text or text in seen:
+            continue
+        seen.add(text)
         rows.append({
             "text": text,
             "true_label": C.PROMPT_INJECTION,
             "source": "reshabhs/SPML_Chatbot_Prompt_Injection",
         })
+        if len(rows) >= n:
+            break
 
-    return _sample(rows, n, rng)
+    return rows[:n]
 
 
 def load_harmful(n: int, rng: random.Random) -> list[dict[str, Any]]:
     from datasets import load_dataset
 
     rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
-    hate = load_dataset("ucberkeley-dlab/measuring-hate-speech", split="train").to_pandas()
-    hate = hate[(hate["hate_speech_score"] >= 1.0) & (hate["text"].str.strip() != "")]
-    for text in hate["text"].drop_duplicates().tolist():
+    hate = load_dataset("ucberkeley-dlab/measuring-hate-speech", split="train")
+    hate = hate.shuffle(seed=rng.randint(0, 2**31 - 1))
+    for row in hate:
+        text = (row.get("text") or "").strip()
+        if float(row.get("hate_speech_score") or 0.0) < 1.0 or not text or text in seen:
+            continue
+        seen.add(text)
         rows.append({
             "text": text,
             "true_label": C.HARMFUL_CONTENT,
             "source": "ucberkeley-dlab/measuring-hate-speech",
             "subtype": "hate",
         })
+        if len(rows) >= n:
+            return rows
 
-    toxic = load_dataset("lmsys/toxic-chat", "toxicchat0124", split="test").to_pandas()
-    toxic = toxic[(toxic["toxicity"] == 1) & (toxic["user_input"].str.strip() != "")]
-    for text in toxic["user_input"].drop_duplicates().tolist():
+    toxic = load_dataset("lmsys/toxic-chat", "toxicchat0124", split="test")
+    toxic = toxic.shuffle(seed=rng.randint(0, 2**31 - 1))
+    for row in toxic:
+        text = (row.get("user_input") or "").strip()
+        if row.get("toxicity") != 1 or not text or text in seen:
+            continue
+        seen.add(text)
         rows.append({
             "text": text,
             "true_label": C.HARMFUL_CONTENT,
             "source": "lmsys/toxic-chat",
             "subtype": "toxic",
         })
+        if len(rows) >= n:
+            return rows
 
     try:
-        spam = load_dataset("ucirvine/sms_spam", split="train").to_pandas()
-        msg_col = _text_column(spam, ("sms", "text", "message"))
-        label_col = _text_column(spam, ("label",))
-        spam = spam[(spam[label_col].astype(str).str.lower().isin(("spam", "1"))) & (spam[msg_col].str.strip() != "")]
-        for text in spam[msg_col].drop_duplicates().tolist():
+        spam = load_dataset("ucirvine/sms_spam", split="train")
+        msg_col = _first_present(spam.column_names, ("sms", "text", "message"))
+        label_col = _first_present(spam.column_names, ("label",))
+        spam = spam.shuffle(seed=rng.randint(0, 2**31 - 1))
+        for row in spam:
+            text = (row.get(msg_col) or "").strip()
+            label = str(row.get(label_col)).lower()
+            if label not in ("spam", "1") or not text or text in seen:
+                continue
+            seen.add(text)
             rows.append({
                 "text": text,
                 "true_label": C.HARMFUL_CONTENT,
                 "source": "ucirvine/sms_spam",
                 "subtype": "spam",
             })
+            if len(rows) >= n:
+                break
     except Exception as exc:  # noqa: BLE001
         print(f"[WARN] could not load ucirvine/sms_spam: {exc}")
 
-    return _sample(rows, n, rng)
+    return rows[:n]
 
 
 def load_safe(n: int, rng: random.Random) -> list[dict[str, Any]]:
     from datasets import load_dataset
 
     rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
-    squad = load_dataset("rajpurkar/squad", split="validation").to_pandas()
-    for text in squad["question"].drop_duplicates().tolist():
-        if text and text.strip():
-            rows.append({"text": text, "true_label": C.SAFE, "source": "rajpurkar/squad"})
+    squad = load_dataset("rajpurkar/squad", split="validation")
+    squad = squad.shuffle(seed=rng.randint(0, 2**31 - 1))
+    for row in squad:
+        text = (row.get("question") or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        rows.append({"text": text, "true_label": C.SAFE, "source": "rajpurkar/squad"})
+        if len(rows) >= n:
+            return rows
 
-    toxic = load_dataset("lmsys/toxic-chat", "toxicchat0124", split="test").to_pandas()
-    toxic = toxic[(toxic["toxicity"] == 0) & (toxic["jailbreaking"] == 0) & (toxic["user_input"].str.strip() != "")]
-    for text in toxic["user_input"].drop_duplicates().tolist():
+    toxic = load_dataset("lmsys/toxic-chat", "toxicchat0124", split="test")
+    toxic = toxic.shuffle(seed=rng.randint(0, 2**31 - 1))
+    for row in toxic:
+        text = (row.get("user_input") or "").strip()
+        if row.get("toxicity") != 0 or row.get("jailbreaking") != 0 or not text or text in seen:
+            continue
+        seen.add(text)
         rows.append({"text": text, "true_label": C.SAFE, "source": "lmsys/toxic-chat"})
+        if len(rows) >= n:
+            break
 
-    return _sample(rows, n, rng)
+    return rows[:n]
 
 
 def assemble(rows_per_label: int, seed: int) -> list[dict[str, Any]]:
