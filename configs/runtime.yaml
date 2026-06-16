@@ -1,0 +1,19 @@
+models:
+  prompt_injection:
+    repo_id: "Krishagarwal314/safety-prompt-injection"
+    local_path: "models/prompt_injection"
+
+  moderation:
+    repo_id: "navodPeiris/minilm-toxic-spam-classifier"
+    local_path: "models/minilm_toxic_spam"
+    backend: "minilm_toxic_spam_onnx"
+
+thresholds:
+  prompt_injection_review: 0.50
+  harmful_content_review: 0.83
+
+runtime:
+  device: "cuda"
+  onnx_provider: "auto"
+  max_length: 512
+  fp16_on_cuda: true

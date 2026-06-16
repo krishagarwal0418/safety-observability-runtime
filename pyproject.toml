@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safety-observability-slim"
+version = "0.1.0"
+description = "Slim observability-only safety classifier runtime."
+requires-python = ">=3.10"
+dependencies = [
+  "huggingface_hub>=0.30.0",
+  "numpy>=1.24",
+  "onnxruntime>=1.18.0",
+  "pyyaml>=6",
+  "safetensors>=0.5.0",
+  "torch>=2.2",
+  "transformers>=4.52.0",
+]
+
+[project.scripts]
+safety-slim = "safety_observability_slim.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["safety_observability_slim*"]
